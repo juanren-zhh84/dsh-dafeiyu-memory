@@ -30,6 +30,24 @@ test('configuration accepts the 256 MiB capacity safety boundary', () => {
   assert.deepEqual(resolveConfig({ recallQuotas: { diary: 2 } }).recallQuotas, { shortTerm: 8, longTerm: 6, diary: 2 });
 });
 
+for (const [name, minimum] of [
+  ['shortTermDays', 7],
+  ['longTermDays', 30],
+  ['recycleDays', 7],
+]) {
+  test(`${name} accepts its minimum retention and higher values`, () => {
+    for (const value of [minimum, minimum + 1]) {
+      assert.equal(resolveConfig({ [name]: value })[name], value);
+    }
+  });
+
+  test(`${name} rejects retention below its minimum`, () => {
+    for (const value of [1, minimum - 1]) {
+      assert.throws(() => resolveConfig({ [name]: value }), { code: 'MEMORY_INVALID_CONFIG' });
+    }
+  });
+}
+
 test('configuration rejects unsafe capacity and invalid retention/review controls', () => {
   for (const overrides of [
     { diskSoftLimitBytes: 256 * 1024 ** 2 - 1 },

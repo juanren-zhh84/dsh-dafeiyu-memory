@@ -35,6 +35,9 @@ export function resolveConfig(overrides = {}) {
   ]) {
     if (!Number.isSafeInteger(config[name]) || config[name] <= 0) invalid(name);
   }
+  for (const [name, minimum] of [['shortTermDays', 7], ['longTermDays', 30], ['recycleDays', 7]]) {
+    if (config[name] < minimum) invalid(name);
+  }
   if (config.diskSoftLimitBytes < 256 * 1024 ** 2) invalid('diskSoftLimitBytes');
   if (config.diskWarningRatio !== 0.8) invalid('diskWarningRatio');
   for (const name of ['shortTerm', 'longTerm', 'diary']) {
