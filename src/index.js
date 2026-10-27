@@ -4,6 +4,7 @@ import { DafeiyuMemoryService } from './service.js';
 import { MemoryDatabase } from './storage/database.js';
 
 export const name = 'dafeiyu-memory';
+export const inject = ['llm', 'agentDefaultModel'];
 
 /** Assemble dependencies; all resource cleanup belongs to this one effect. */
 export async function apply(ctx, config = {}, dependencies = {}) {
