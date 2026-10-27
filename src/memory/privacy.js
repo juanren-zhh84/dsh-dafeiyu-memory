@@ -40,7 +40,7 @@ export function candidateScope(layer, request) {
     sql: `${state} AND conversation_kind = 'group' AND conversation_key = ? AND visibility IN ('group', 'conversation', 'public')`,
     params: [request.conversationKey],
   };
-  return { sql: `${state} AND (visibility = 'public' OR (visibility = 'conversation' AND conversation_kind = 'private' AND conversation_key = ? AND actor_key = ?))`,
+  return { sql: `${state} AND (visibility = 'public' OR (visibility = 'conversation' AND conversation_kind = 'private' AND conversation_key = ? AND (direction = 'outgoing' OR actor_key = ?)))`,
     params: [request.conversationKey, request.actorKey] };
 }
 
@@ -57,7 +57,7 @@ export function allowsMemory(layer, row, request) {
   if (request.audience === 'qq-group') return row.conversation_kind === 'group'
     && row.conversation_key === request.conversationKey && ['group', 'conversation', 'public'].includes(row.visibility);
   return row.visibility === 'public' || (row.visibility === 'conversation' && row.conversation_kind === 'private'
-    && row.conversation_key === request.conversationKey && row.actor_key === request.actorKey);
+    && row.conversation_key === request.conversationKey && (row.direction === 'outgoing' || row.actor_key === request.actorKey));
 }
 
 /** Explicit output fields prevent source, account, reference and internal-ID metadata escaping. */

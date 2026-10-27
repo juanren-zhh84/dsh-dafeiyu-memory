@@ -7,6 +7,7 @@ import { createTempHome } from './helpers/temp-home.js';
 import { eventInput, NOW, DAY } from './fixtures/events.js';
 import { apply } from '../src/index.js';
 import { createFakeContext } from './helpers/fake-context.js';
+import { allowsMemory, candidateScope } from '../src/memory/privacy.js';
 
 const { RecallEngine } = await import('../src/memory/recall.js').catch((error) => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
@@ -80,6 +81,30 @@ test('ordinary private audience only receives its conversation and actor plus pu
   assert.deepEqual(new Set(contents(result, 'long')), new Set(['自己的长期', '公开长期']));
   assert.deepEqual(contents(result, 'diary'), ['公开日记']);
   assert.doesNotMatch(JSON.stringify(result), /friend-12345|other-67890|qq:|internal-|actorKey|subjectKey|sourceRefs/);
+});
+
+test('private SQL candidates and independent DTO check admit same-conversation bot replies and reject foreign or owner-private traffic', async (t) => {
+  const c = await setup(t);
+  const cases = [
+    ['联系人入站', {}, true],
+    ['当前助手出站', { direction: 'outgoing', actorKey: 'qq:bot' }, true],
+    ['其他联系人入站', { actorKey: 'other-fixture' }, false],
+    ['其他会话助手出站', { direction: 'outgoing', actorKey: 'qq:bot', conversationKey: 'private:other-fixture' }, false],
+    ['同会话主人隐私出站', { direction: 'outgoing', actorKey: 'qq:bot', visibility: 'owner-private' }, false],
+    ['其他主人会话出站', { direction: 'outgoing', actorKey: 'qq:bot', visibility: 'owner-private', conversationKey: 'private:owner-fixture' }, false],
+    ['伪装私聊的群出站', { direction: 'outgoing', actorKey: 'qq:bot', conversationKind: 'group' }, false],
+    ['公开事件仍可见', { visibility: 'public', conversationKey: 'private:other-fixture', actorKey: 'other-fixture' }, true],
+  ];
+  for (const [content, overrides] of cases) await c.event(content, overrides);
+  const req = request({ audience: 'qq-private' });
+  const scope = candidateScope('short', req);
+  const selected = c.database.read((db) => new Set(db.prepare(`SELECT content_text FROM memory_events WHERE ${scope.sql}`).all(...scope.params).map((r) => r.content_text)));
+  const rows = c.database.read((db) => db.prepare('SELECT * FROM memory_events').all());
+  for (const [content, , allowed] of cases) {
+    assert.equal(selected.has(content), allowed, `SQL: ${content}`);
+    assert.equal(allowsMemory('short', rows.find((r) => r.content_text === content), req), allowed, `DTO: ${content}`);
+  }
+  assert.deepEqual(new Set(contents(c.engine.recall(req), 'short')), new Set(cases.filter(([, , allowed]) => allowed).map(([content]) => content)));
 });
 
 test('group audience only receives current group events, scoped long-term and public diary summaries', async (t) => {

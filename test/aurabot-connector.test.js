@@ -6,6 +6,10 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fakeAurabot } from './helpers/fake-aurabot.js';
+import { MemoryDatabase } from '../src/storage/database.js';
+import { MemoryRepository } from '../src/memory/repository.js';
+import { RecallEngine } from '../src/memory/recall.js';
+import { createTempHome } from './helpers/temp-home.js';
 
 const moduleUrl = new URL('../aurabot-module/dafeiyu-memory/index.mjs', import.meta.url);
 const group = { kind: 'group', chatId: 'group:fixture-room', userId: 'friend-fixture', nickname: '测试成员', text: '普通群消息', messageId: 'fixture-message', raw: { time: 1700000000 }, mentioned: false };
@@ -69,6 +73,42 @@ test('private events protect owners, preserve media placeholders and safely fall
   await fake.tick();
   assert.deepEqual(events.map((e) => e.visibility), ['owner-private', 'conversation', 'conversation']);
   assert.ok(events.every((e) => e.contentText === '[图片]' && e.occurredAt === 1700000000123 && !Object.hasOwn(e, 'sourceKey')));
+});
+
+test('real core with fake Aurabot synchronously recalls both sides of one private chat while excluding other actors and owner-private replies', async (t) => {
+  const dir = createTempHome(), clock = { now: () => 1700000000123 };
+  const database = await MemoryDatabase.open(join(dir, 'memory.sqlite'));
+  const repository = new MemoryRepository({ database, clock });
+  const engine = new RecallEngine({ database, clock });
+  const fake = fakeAurabot(join(dir, 'module-data'));
+  fake.service = { recordEvent: (event) => repository.insertEvent(event), recall: (req) => engine.recall(req).text };
+  const { setupConnector } = await import(moduleUrl);
+  setupConnector(fake.api, { clock });
+  t.after(async () => { fake.dispose(); await database.close(); });
+  const current = { kind: 'private', chatId: 'private:friend-fixture', userId: 'friend-fixture' };
+  for (const [userId, incoming, outgoing] of [
+    ['friend-fixture', '当前联系人入站', '当前助手回复'],
+    ['other-fixture', '其他联系人入站', '其他联系人助手回复'],
+    ['owner-fixture', '主人私密入站', '主人私密助手回复'],
+  ]) {
+    assert.equal(fake.emit('message', { ...group, kind: 'private', chatId: `private:${userId}`, userId, text: incoming, messageId: `message:${userId}` }), false);
+    fake.emit('activity', { kind: 'out', chatId: `private:${userId}`, reply: outgoing });
+  }
+  await fake.tick();
+  const base = { source: 'qq', conversationKind: 'private', conversationKey: current.chatId,
+    actorKey: 'qq:other-fixture', actorName: '测试联系人', direction: 'incoming',
+    contentText: '同会话伪造其他来信', occurredAt: clock.now(), visibility: 'conversation' };
+  await repository.insertEvent({ ...base, sourceKey: 'spoofed-incoming' });
+  await repository.insertEvent({ ...base, sourceKey: 'protected-reply', actorKey: 'qq:bot', direction: 'outgoing', contentText: '同会话主人私密回复', visibility: 'owner-private' });
+  const replyActors = database.read((db) => db.prepare("SELECT actor_key FROM memory_events WHERE direction = 'outgoing'").all());
+  assert.ok(replyActors.every((row) => row.actor_key === 'qq:bot'));
+  const context = fake.context(current);
+  assert.equal(typeof context, 'string');
+  assert.match(context, /当前联系人入站/);
+  assert.match(context, /当前助手回复/);
+  assert.doesNotMatch(context, /其他联系人|主人私密|伪造/);
+  assert.deepEqual(fake.warnings, []);
+  await fake.tick();
 });
 
 test('empty or whitespace-only input records a placeholder without inspecting media arrays', async (t) => {
