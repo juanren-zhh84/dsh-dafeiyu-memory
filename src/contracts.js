@@ -66,7 +66,7 @@ export function memoryError(code, message) {
  * Report: { ok, dryRun, startedAt, finishedAt, sources: [{ source, status,
  * imported, skipped, failed, planned, code, privateContextCode? }], scanCode?, reportCode? }.
  * Source statuses: skipped/planned/imported/failed/optional-unsupported/optional-failed.
- * Imported counts committed targets, skipped counts ledger/target/purge duplicates;
+ * Imported counts committed targets, skipped counts inactive source records and ledger/target/purge duplicates;
  * failed counts known records in a failed transaction or one unparseable batch.
  * planned counts new targets (including committed targets on actual runs).
  * dryRun writes neither snapshots, target data, ledger, reports nor source files.

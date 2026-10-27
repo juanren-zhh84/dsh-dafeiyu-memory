@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, basename, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { parseAurabot } from './aurabot.js';
@@ -55,16 +56,23 @@ export class ImportManager {
     const report = { ok: true, dryRun, startedAt, finishedAt: startedAt, sources: [] };
     for (const source of Object.keys(selected)) {
       const row = reportRow(source); report.sources.push(row);
-      let opened, files = [];
+      let opened, scratchRoot, files = [];
       try {
         const path = selected[source] ?? (source === 'douyin' ? await resolveDouyinPath({ home, io: this.io, env: this.env }) : undefined);
         if (!path) invalid();
         files = await this.#files(source, path);
         if (!files.length) continue;
         if (source === 'douyin') {
-          opened = new DatabaseSync(path, { readOnly: true });
+          scratchRoot = await this.#scratch();
+          const tempMain = join(scratchRoot, basename(path));
+          await this.io.writeFile(tempMain, files[0].bytes, { mode: 0o600 });
+          for (const sidecar of files[0].sidecars) if (sidecar.bytes !== undefined) {
+            await this.io.writeFile(`${tempMain}${sidecar.suffix}`, sidecar.bytes, { mode: 0o600 });
+          }
+          await this.#verify(files);
+          opened = new DatabaseSync(join(scratchRoot, basename(path)), { readOnly: true });
           opened.exec('BEGIN');
-          files[0].records = parseDouyin(opened, this.config);
+          if (dryRun) files[0].records = parseDouyin(opened, this.config);
           // Installed private-context JSON does not provide reliable source timestamps.
           row.privateContextCode = 'UNSUPPORTED_PRIVATE_CONTEXT';
         } else {
@@ -76,8 +84,14 @@ export class ImportManager {
         await this.#verify(files);
         if (!dryRun) {
           if (!this.canGrow()) invalid('CAPACITY_LIMIT');
-          await this.#snapshot(source, files, opened);
+          const snapshotRoot = await this.#snapshot(source, files, opened);
           await this.#verify(files);
+          if (source === 'douyin') {
+            opened.exec('ROLLBACK'); opened.close(); opened = undefined;
+            opened = new DatabaseSync(join(snapshotRoot, files[0].logical), { readOnly: true });
+            opened.exec('BEGIN');
+            files[0].records = parseDouyin(opened, this.config);
+          }
         }
         row.code = 'OK'; row.status = dryRun ? 'planned' : 'imported';
         const plannedKeys = new Set();
@@ -106,6 +120,11 @@ export class ImportManager {
         row.status = source === 'douyin' ? (row.code === 'UNSUPPORTED_SCHEMA' ? 'optional-unsupported' : 'optional-failed') : 'failed';
       } finally {
         if (opened) { try { opened.exec('ROLLBACK'); } catch {} try { opened.close(); } catch {} }
+        // The validated mkdtemp result is the only recursively removed directory.
+        if (scratchRoot) try { await this.io.rm(scratchRoot, { recursive: true, force: true }); } catch {
+          row.failed++; row.code = 'IMPORT_FAILED';
+          row.status = source === 'douyin' ? 'optional-failed' : 'failed';
+        }
         try { await this.#verify(files); } catch {
           row.failed++; row.code = 'SOURCE_CHANGED';
           row.status = source === 'douyin' ? 'optional-failed' : 'failed';
@@ -145,9 +164,14 @@ export class ImportManager {
       for (const name of ['memories.json','diary.json']) await add(join(path, name), name);
     } else await add(path, source === 'pet' ? 'memory.json' : 'shared.sqlite');
     if (source === 'douyin' && files.length) {
-      // The backup API includes WAL state; hash it as well to detect concurrent writers.
-      try { files[0].wal = { path: `${path}-wal`, sha256: fingerprint(await this.io.readFile(`${path}-wal`)) }; }
-      catch (error) { if (error.code !== 'ENOENT') throw error; files[0].wal = { path: `${path}-wal`, sha256: null }; }
+      // Capture existence as well as bytes: opening SQLite on the source is forbidden.
+      files[0].sidecars = [];
+      for (const suffix of ['-wal','-shm']) {
+        const sidecar = { path: `${path}${suffix}`, suffix, sha256: null };
+        try { sidecar.bytes = await this.io.readFile(sidecar.path); sidecar.sha256 = fingerprint(sidecar.bytes); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        files[0].sidecars.push(sidecar);
+      }
     }
     return files;
   }
@@ -155,9 +179,9 @@ export class ImportManager {
     try {
       for (const file of files) {
         if (fingerprint(await this.io.readFile(file.path)) !== file.sha256) invalid('SOURCE_CHANGED');
-        if (file.wal) {
-          let hash = null; try { hash = fingerprint(await this.io.readFile(file.wal.path)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-          if (hash !== file.wal.sha256) invalid('SOURCE_CHANGED');
+        for (const sidecar of file.sidecars ?? []) {
+          let hash = null; try { hash = fingerprint(await this.io.readFile(sidecar.path)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          if (hash !== sidecar.sha256) invalid('SOURCE_CHANGED');
         }
       }
     } catch { invalid('SOURCE_CHANGED'); }
@@ -166,12 +190,19 @@ export class ImportManager {
     try {
       for (const file of files) {
         if (fingerprint(readFileSync(file.path)) !== file.sha256) invalid('SOURCE_CHANGED');
-        if (file.wal) {
-          let hash = null; try { hash = fingerprint(readFileSync(file.wal.path)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-          if (hash !== file.wal.sha256) invalid('SOURCE_CHANGED');
+        for (const sidecar of file.sidecars ?? []) {
+          let hash = null; try { hash = fingerprint(readFileSync(sidecar.path)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          if (hash !== sidecar.sha256) invalid('SOURCE_CHANGED');
         }
       }
     } catch { invalid('SOURCE_CHANGED'); }
+  }
+  async #scratch() {
+    const parent = resolve(tmpdir());
+    const root = resolve(await this.io.mkdtemp(join(parent, 'dafeiyu-import-')));
+    if (dirname(root) !== parent || !basename(root).startsWith('dafeiyu-import-')) invalid();
+    // Publish the root to the caller before writing so failed copies are also cleaned.
+    return root;
   }
   async #snapshot(source, files, opened) {
     const root = join(this.paths.backups, 'import-sources', randomUUID());
@@ -191,6 +222,7 @@ export class ImportManager {
       const target = join(root, 'manifest.json');
       await this.io.writeFile(target, JSON.stringify(manifest), { mode: 0o600 });
       await syncFile(this.io, target);
+      return root;
     } catch { invalid('BACKUP_FAILED'); }
   }
   #plan(db, source, records, seen) {
@@ -199,7 +231,7 @@ export class ImportManager {
       const externalKey = record.type === 'event' ? JSON.stringify([record.value.source, record.value.sourceKey]) : null;
       const exists = externalKey && (db.prepare('SELECT 1 FROM memory_events WHERE external_key=?').get(externalKey)
         || db.prepare("SELECT 1 FROM purge_ledger WHERE source_hash=? AND object_kind='event'").get(fingerprint(`event\0${externalKey}`)));
-      if (exists || seen.has(record.externalKey) || db.prepare('SELECT 1 FROM import_ledger WHERE source=? AND external_key=?').get(source, record.externalKey)) skipped++;
+      if (record.inactive || exists || seen.has(record.externalKey) || db.prepare('SELECT 1 FROM import_ledger WHERE source=? AND external_key=?').get(source, record.externalKey)) skipped++;
       else planned++;
       seen.add(record.externalKey);
     }
@@ -210,18 +242,21 @@ export class ImportManager {
     for (const record of records) {
       if (db.prepare('SELECT 1 FROM import_ledger WHERE source=? AND external_key=?').get(source, record.externalKey)) { skipped++; continue; }
       const value = record.value;
-      let id = randomUUID(), result = 'imported';
-      if (record.type === 'event') {
-        const externalKey = JSON.stringify([value.source, value.sourceKey]);
-        const existing = db.prepare('SELECT id FROM memory_events WHERE external_key=?').get(externalKey);
-        const purged = db.prepare("SELECT 1 FROM purge_ledger WHERE source_hash=? AND object_kind='event'").get(fingerprint(`event\0${externalKey}`));
-        if (existing || purged) { id = existing?.id ?? null; result = 'skipped'; }
-        else db.prepare(`INSERT INTO memory_events(id,source,source_key,conversation_kind,conversation_key,actor_key,actor_name,direction,content_text,occurred_at,visibility,state,review_due_at,external_key,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)`).run(id,value.source,value.sourceKey,value.conversationKind,value.conversationKey,value.actorKey,value.actorName,value.direction,value.contentText,value.occurredAt,value.visibility,value.occurredAt+this.config.shortTermDays*DAY,externalKey,now,now);
-      } else if (record.type === 'item') db.prepare(`INSERT INTO memory_items(id,kind,subject_key,subject_name,content,importance,confidence,visibility,promoted_at,expires_at,state,source_refs_json,created_at,updated_at)
-        VALUES(?,'fact',?,?,?,?,1,?,?,?,'active','[]',?,?)`).run(id,value.subjectKey,value.subjectName,value.content,value.importance,value.visibility,now,now+this.config.longTermDays*DAY,now,now);
-      else db.prepare(`INSERT INTO diary_entries(id,title,body,written_at,visibility,source_refs_json,created_at,updated_at)
-        VALUES(?,?,?,?,?,'[]',?,?)`).run(id,value.title,value.body,value.writtenAt,value.visibility,now,now);
+      let id = null, result = 'skipped-inactive';
+      if (!record.inactive) {
+        id = randomUUID(); result = 'imported';
+        if (record.type === 'event') {
+          const externalKey = JSON.stringify([value.source, value.sourceKey]);
+          const existing = db.prepare('SELECT id FROM memory_events WHERE external_key=?').get(externalKey);
+          const purged = db.prepare("SELECT 1 FROM purge_ledger WHERE source_hash=? AND object_kind='event'").get(fingerprint(`event\0${externalKey}`));
+          if (existing || purged) { id = existing?.id ?? null; result = 'skipped'; }
+          else db.prepare(`INSERT INTO memory_events(id,source,source_key,conversation_kind,conversation_key,actor_key,actor_name,direction,content_text,occurred_at,visibility,state,review_due_at,external_key,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)`).run(id,value.source,value.sourceKey,value.conversationKind,value.conversationKey,value.actorKey,value.actorName,value.direction,value.contentText,value.occurredAt,value.visibility,value.occurredAt+this.config.shortTermDays*DAY,externalKey,now,now);
+        } else if (record.type === 'item') db.prepare(`INSERT INTO memory_items(id,kind,subject_key,subject_name,content,importance,confidence,visibility,promoted_at,expires_at,state,source_refs_json,created_at,updated_at)
+          VALUES(?,'fact',?,?,?,?,1,?,?,?,'active','[]',?,?)`).run(id,value.subjectKey,value.subjectName,value.content,value.importance,value.visibility,now,now+this.config.longTermDays*DAY,now,now);
+        else db.prepare(`INSERT INTO diary_entries(id,title,body,written_at,visibility,source_refs_json,created_at,updated_at)
+          VALUES(?,?,?,?,?,'[]',?,?)`).run(id,value.title,value.body,value.writtenAt,value.visibility,now,now);
+      }
       db.prepare('INSERT INTO import_ledger(source,external_key,fingerprint,result,target_type,target_id,imported_at) VALUES(?,?,?,?,?,?,?)')
         .run(source,record.externalKey,record.fingerprint,result,record.type,id,now);
       if (result === 'imported') planned++; else skipped++;

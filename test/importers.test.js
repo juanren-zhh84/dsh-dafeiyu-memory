@@ -240,3 +240,119 @@ test('default Douyin discovery uses the verified runtime-location and environmen
   await put(join(c.home,'douyin-browser','runtime-location.json'),{version:1,stateDir:'relative',memoryDir});c.manager.env={};
   report=await c.manager.importExisting({dryRun:true});assert.equal(source(report,'douyin').status,'optional-failed');assert.equal(source(report,'douyin').code,'INVALID_SOURCE');
 });
+
+async function walWithoutShm(c) {
+  const live=join(c.home,'fixture-writer.sqlite');sqliteFixture(live);
+  const writer=new DatabaseSync(live);writer.exec('PRAGMA journal_mode=WAL');
+  writer.prepare("UPDATE memory_entries SET content='isolated WAL fixture' WHERE id=1").run();
+  const directory=join(c.home,'sqlite-source');await fs.mkdir(directory);
+  c.sources.douyin=join(directory,'shared.sqlite');
+  for(const suffix of ['','-wal']) await fs.copyFile(live+suffix,c.sources.douyin+suffix);
+  writer.close();return directory;
+}
+async function directoryState(directory) {
+  const names=await tree(directory);
+  return Promise.all(names.map(async name=>[name,digest(await fs.readFile(join(directory,name)))]));
+}
+
+test('Douyin dryRun leaves a main+WAL source without SHM byte-for-byte unchanged and cleans scratch copies',async t=>{
+  const scratch=[];
+  const c=await setup(t,{io:{...fs,mkdtemp:async(...args)=>{const path=await fs.mkdtemp(...args);scratch.push(path);return path;}}});
+  const directory=await walWithoutShm(c),before=await directoryState(directory);
+  const report=await c.manager.importExisting({sources:{douyin:c.sources.douyin},dryRun:true});
+  assert.equal(source(report,'douyin').planned,1);assert.deepEqual(await directoryState(directory),before);
+  assert.equal(c.rows('import_ledger').length,0);assert.deepEqual(await tree(c.paths.backups),[]);
+  assert.ok(scratch.length);for(const path of scratch)await assert.rejects(fs.access(path),{code:'ENOENT'});
+});
+
+test('Douyin actual import reads WAL through a protected official backup without opening the source SQLite',async t=>{
+  const c=await setup(t),directory=await walWithoutShm(c),before=await directoryState(directory);
+  const report=await c.manager.importExisting({sources:{douyin:c.sources.douyin}});
+  assert.equal(source(report,'douyin').imported,1);assert.equal(c.rows('memory_items')[0].content,'isolated WAL fixture');
+  assert.deepEqual(await directoryState(directory),before);
+  const names=await tree(join(c.paths.backups,'import-sources'));const snapshot=names.find(name=>name.endsWith('shared.sqlite'));
+  const db=new DatabaseSync(join(c.paths.backups,'import-sources',snapshot),{readOnly:true});
+  assert.equal(db.prepare('SELECT content FROM memory_entries').get().content,'isolated WAL fixture');db.close();
+});
+
+test('Douyin source SHM presence changes during copying are SOURCE_CHANGED with no ledger writes',async t=>{
+  let sourceFile,changed=false;
+  const c=await setup(t,{io:{...fs,writeFile:async(...args)=>{await fs.writeFile(...args);if(sourceFile&&!changed){changed=true;await fs.writeFile(sourceFile+'-shm','external fixture');}}}});
+  await walWithoutShm(c);sourceFile=c.sources.douyin;
+  const report=await c.manager.importExisting({sources:{douyin:sourceFile},dryRun:true});
+  assert.equal(source(report,'douyin').code,'SOURCE_CHANGED');assert.equal(c.rows('import_ledger').length,0);
+});
+
+test('Aurabot inactive and superseded facts only produce skipped-inactive ledger entries',async t=>{
+  const c=await setup(t),file=join(c.sources.aurabot,'memories.json');
+  const items=[{id:'old-fact',text:'inactive fixture body',at:NOW,invalidAt:NOW},{id:'superseded-fact',text:'superseded fixture body',at:NOW,supersededBy:'new-fact'},{id:'new-fact',text:'active fixture body',at:NOW}];
+  await put(file,{items});
+  let report=await c.manager.importExisting({sources:{aurabot:c.sources.aurabot},dryRun:true});
+  assert.equal(source(report,'aurabot').planned,1);assert.equal(source(report,'aurabot').skipped,2);assert.equal(c.rows('import_ledger').length,0);
+  report=await c.manager.importExisting({sources:{aurabot:c.sources.aurabot}});
+  assert.equal(source(report,'aurabot').imported,1);assert.equal(source(report,'aurabot').skipped,2);
+  assert.deepEqual(c.rows('memory_items').map(row=>row.content),['active fixture body']);
+  assert.deepEqual(c.rows('import_ledger').map(row=>row.result).sort(),['imported','skipped-inactive','skipped-inactive']);
+  assert.ok(c.rows('import_ledger').filter(row=>row.result==='skipped-inactive').every(row=>row.target_id===null));
+  assert.doesNotMatch(JSON.stringify(c.rows('import_ledger')),/inactive fixture body|superseded fixture body/);
+  delete items[0].invalidAt;delete items[1].supersededBy;await put(file,{items});
+  report=await c.manager.importExisting({sources:{aurabot:c.sources.aurabot}});
+  assert.equal(source(report,'aurabot').imported,0);assert.equal(source(report,'aurabot').skipped,3);assert.equal(c.rows('memory_items').length,1);
+});
+
+test('an inactive Aurabot fact restored after dryRun can import if no ledger has been committed',async t=>{
+  const c=await setup(t),file=join(c.sources.aurabot,'memories.json'),row={id:'restorable-fact',text:'restored fixture',at:NOW,invalidAt:NOW};
+  await put(file,{items:[row]});let report=await c.manager.importExisting({sources:{aurabot:c.sources.aurabot},dryRun:true});
+  assert.equal(source(report,'aurabot').planned,0);assert.equal(source(report,'aurabot').skipped,1);
+  delete row.invalidAt;await put(file,{items:[row]});report=await c.manager.importExisting({sources:{aurabot:c.sources.aurabot}});
+  assert.equal(source(report,'aurabot').imported,1);assert.equal(c.rows('memory_items')[0].content,'restored fixture');
+});
+
+test('two different object pet IDs fail the whole file with stable sanitized errors and zero rows',async t=>{
+  const c=await setup(t);await put(c.sources.pet,{k:{p:{messages:[{id:{first:1},role:'user',content:'first private fixture',ts:NOW},{id:{second:2},role:'assistant',content:'second private fixture',ts:NOW}]}}});
+  for(const dryRun of [true,false]) {
+    const report=await c.manager.importExisting({sources:{pet:c.sources.pet},dryRun});
+    assert.equal(report.ok,false);assert.equal(source(report,'pet').code,'INVALID_SOURCE');assert.equal(source(report,'pet').imported,0);
+    assert.equal(c.rows('memory_events').length,0);assert.equal(c.rows('import_ledger').length,0);
+    assert.doesNotMatch(JSON.stringify(report),/first private|second private|first:|second:/);
+  }
+});
+
+test('pet IDs accept only nonempty strings or safe integers before namespace conversion',async t=>{
+  const c=await setup(t);
+  for(const id of [[],{},'', '  ',null,true,1.5,Number.MAX_SAFE_INTEGER+1]) {
+    await put(c.sources.pet,{k:{p:{messages:[{id,role:'user',content:'invalid fixture',ts:NOW}]}}});
+    const report=await c.manager.importExisting({sources:{pet:c.sources.pet},dryRun:true});assert.equal(source(report,'pet').code,'INVALID_SOURCE');
+  }
+  const row={role:'user',content:'stable pet fixture',ts:NOW};
+  await put(c.sources.pet,{k:{p:{messages:[{...row,id:7},{...row,id:'7'},{...row,id:'named-id'},{...row}]}}});
+  let report=await c.manager.importExisting({sources:{pet:c.sources.pet}});assert.equal(source(report,'pet').imported,3);assert.equal(source(report,'pet').skipped,1);
+  report=await c.manager.importExisting({sources:{pet:c.sources.pet}});assert.equal(source(report,'pet').imported,0);assert.equal(source(report,'pet').skipped,4);
+});
+
+test('pet ID accessors are rejected before invocation or string conversion',async t=>{
+  const {parsePet}=await import('../src/importers/pet.js');let calls=0;
+  const row={role:'user',content:'accessor fixture',ts:NOW};Object.defineProperty(row,'id',{enumerable:true,get(){calls++;throw Error('sensitive fixture getter');}});
+  const original=JSON.parse;t.mock.method(JSON,'parse',value=>value==='pet-getter-fixture'?{k:{p:{messages:[row]}}}:original(value));
+  assert.throws(()=>parsePet(Buffer.from('pet-getter-fixture'),'memory.json',resolveConfig()),{code:'INVALID_SOURCE'});assert.equal(calls,0);
+});
+
+test('Douyin failed scratch writes clean the temporary directory and preserve the complete source state',async t=>{
+  let scratch;
+  const c=await setup(t,{io:{...fs,mkdtemp:async(...args)=>{scratch=await fs.mkdtemp(...args);return scratch;},writeFile:async(file,...args)=>{if(scratch&&file.startsWith(scratch))throw Error('sensitive scratch fixture');return fs.writeFile(file,...args);}}});
+  const directory=await walWithoutShm(c),before=await directoryState(directory);
+  const report=await c.manager.importExisting({sources:{douyin:c.sources.douyin},dryRun:true});
+  assert.equal(report.ok,true);assert.equal(source(report,'douyin').status,'optional-failed');assert.equal(source(report,'douyin').code,'IMPORT_FAILED');
+  assert.deepEqual(await directoryState(directory),before);await assert.rejects(fs.access(scratch),{code:'ENOENT'});
+  assert.equal(c.rows('import_ledger').length,0);assert.deepEqual(await tree(c.paths.backups),[]);assert.doesNotMatch(JSON.stringify(report),/sensitive scratch/);
+});
+
+test('Douyin copying detects changes to every captured main/WAL/SHM hash or existence',async t=>{
+  for(const suffix of ['','-wal','-shm']) {
+    let mutate;
+    const c=await setup(t,{io:{...fs,writeFile:async(...args)=>{await fs.writeFile(...args);if(mutate){const run=mutate;mutate=null;await run();}}}});
+    await walWithoutShm(c);if(suffix==='-shm')await fs.writeFile(c.sources.douyin+'-shm','initial fixture');
+    mutate=()=>fs.appendFile(c.sources.douyin+suffix,'externally changed fixture');
+    const report=await c.manager.importExisting({sources:{douyin:c.sources.douyin},dryRun:true});assert.equal(source(report,'douyin').code,'SOURCE_CHANGED');assert.equal(c.rows('import_ledger').length,0);
+  }
+});
