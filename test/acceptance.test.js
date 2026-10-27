@@ -19,7 +19,7 @@ const discard = ({ mode, candidates }) => ({ ...(mode === 'short-term' ? { retai
 const retain = ({ mode, candidates }) => mode === 'short-term'
   ? { retain: candidates.map(x => ({ sourceIds: [x.id], kind: 'fact', content: x.content, importance: 0.8 })), diary: [], discard: [] }
   : discard({ mode, candidates });
-async function assemble(t, review = discard, pluginMode = false) {
+async function assemble(t, review = discard, pluginMode = false, applyPlugin = apply) {
   const home = mkdtempSync(join(tmpdir(), 'memory-acceptance-'));
   const paths = resolveMemoryPaths({ dshHome: home });
   const time = { value: NOW }, clock = { now: () => time.value };
@@ -28,13 +28,20 @@ async function assemble(t, review = discard, pluginMode = false) {
   const open = async () => {
     if (pluginMode) {
       const ctx = createFakeContext(), timers = new Set();
-      await apply(ctx, {}, { dshHome: home, clock, reviewModel: model, timer: {
-        setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn),
-      } });
-      h.service = ctx.get('dafeiyuMemory');
-      // Await the same startup promise created by the actual plugin effect; do not manually run reviews.
-      await h.service.scheduler.start();
+      let signalCatchup, deadline;
+      const automaticCatchup = new Promise((resolve, reject) => {
+        signalCatchup = resolve;
+        deadline = setTimeout(() => reject(Error('AUTOMATIC_CATCHUP_MISSING')), 5000);
+      });
       h.stop = async () => { for (const dispose of ctx.disposers) await dispose(); assert.equal(timers.size, 0); };
+      try {
+        await applyPlugin(ctx, {}, { dshHome: home, clock, reviewModel: model, timer: {
+          setTimeout: fn => { timers.add(fn); signalCatchup(); return fn; }, clearTimeout: fn => timers.delete(fn),
+        } });
+        h.service = ctx.get('dafeiyuMemory');
+        // The host timer is registered only after the effect's automatic startup catch-up has finished.
+        await automaticCatchup;
+      } finally { clearTimeout(deadline); }
       h.activeTimers = () => timers.size;
       h.effects = ctx.disposers.length;
     } else {
@@ -49,7 +56,8 @@ async function assemble(t, review = discard, pluginMode = false) {
   };
   h.restart = async () => { h.qq.dispose(); await h.stop(); await open(); };
   h.rows = table => h.service.database.read(db => db.prepare(`SELECT * FROM ${table}`).all());
-  await open();
+  try { await open(); }
+  catch (error) { await h.stop?.(); rmSync(home, { recursive: true, force: true }); throw error; }
   t.after(async () => { h.qq.dispose(); await h.stop(); rmSync(home, { recursive: true, force: true }); });
   return h;
 }
@@ -144,6 +152,14 @@ test('09 关闭并重新组装公开服务后恢复到期任务且重复启动�
   await h.restart(); assert.equal((await h.service.runDueReviews()).completed, 0);
   assert.equal(h.effects, 1); assert.equal(h.activeTimers(), 1);
   assert.equal(h.service.status().items.active, 1); assert.equal(h.rows('review_jobs').length, 1);
+});
+test('09 启动恢复依赖真实 effect：移除启动语句的只读变体必须失败', async t => {
+  const original = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.ok(original.includes('service.scheduler.start();'));
+  const variant = original.replace('service.scheduler.start();', '').replace(/from '(\.\/[^']+)'/g,
+    (_, path) => `from '${new URL(path, new URL('../src/index.js', import.meta.url)).href}'`);
+  const { apply: withoutAutomaticStart } = await import(`data:text/javascript;base64,${Buffer.from(variant).toString('base64')}`);
+  await assert.rejects(assemble(t, retain, true, withoutAutomaticStart), /AUTOMATIC_CATCHUP_MISSING/);
 });
 test('10 未安装抖音时核心服务、QQ 与 pet 完整工作且不创建其目录', async t => {
   const h = await assemble(t, retain);

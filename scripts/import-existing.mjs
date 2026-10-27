@@ -77,7 +77,8 @@ export async function importCore({ dshHome, apply = false }) {
   const targetHash = existing ? fingerprint(readFileSync(paths.database)) : null;
   const before = snapshotCoreSources(home), config = resolveConfig();
   const sources = { aurabot: join(home, 'plugins-data/aurabot'), pet: join(home, 'dsh-pet/memory.json') };
-  let scratch, stageHome, database, reader;
+  let scratch, stageHome, database, reader, outcome, primaryError, committed = false;
+  const result = value => { outcome = value; return value; };
   const sourceGate = () => {
     if (JSON.stringify(snapshotCoreSources(home)) !== JSON.stringify(before)) fail('SOURCE_CHANGED');
   };
@@ -89,10 +90,10 @@ export async function importCore({ dshHome, apply = false }) {
     if (existing) { reader = offlineCopy(paths.database); database = { read: fn => fn(reader) }; }
     else { scratch = await mkdtemp(join(tmpdir(), 'memory-import-plan-')); database = await MemoryDatabase.open(join(scratch, 'plan.sqlite')); }
     const plan = await new ImportManager({ database, paths, config }).importExisting({ dryRun: true, sources });
-    if (!plan.ok) return { ...plan, code: 'IMPORT_PREFLIGHT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
+    if (!plan.ok) return result({ ...plan, code: 'IMPORT_PREFLIGHT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' });
     sourceGate();
     if (existing && fingerprint(readFileSync(paths.database)) !== targetHash) fail('TARGET_CHANGED');
-    if (!apply) return { ...plan, code: 'DRY_RUN_OK', backupTarget: 'CORE_IMPORT_SOURCES' };
+    if (!apply) return result({ ...plan, code: 'DRY_RUN_OK', backupTarget: 'CORE_IMPORT_SOURCES' });
     if (reader) { reader.close(); reader = undefined; database = undefined; }
     else { await database.close(); database = undefined; }
     // All parsing, backup and database writes happen in a same-volume isolated staging directory.
@@ -120,7 +121,7 @@ export async function importCore({ dshHome, apply = false }) {
     const report = await new ImportManager({ database, paths: stagePaths, config }).importExisting({ dryRun: false, sources: stageSources });
     sourceGate();
     await database.close(); database = undefined;
-    if (!report.ok) return { ...report, code: 'IMPORT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
+    if (!report.ok) return result({ ...report, code: 'IMPORT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' });
     if (report.reportCode) fail('IMPORT_FAILED');
     sourceGate(); targetGate();
     if (existing) {
@@ -137,6 +138,7 @@ export async function importCore({ dshHome, apply = false }) {
       }
       targetGate(); sourceGate();
       renameSync(stagePaths.database, paths.database);
+      committed = true;
       // A success report is published only after its database. Reporting failure cannot undo a commit.
       try {
         if (existsSync(stagePaths.reports)) {
@@ -150,13 +152,25 @@ export async function importCore({ dshHome, apply = false }) {
     } else {
       targetGate(); sourceGate();
       renameSync(stagePaths.root, paths.root);
+      committed = true;
     }
     // Publication is the commit point. Later source activity is a new state, never a failed import.
-    return { ...report, code: report.ok ? 'IMPORT_OK' : 'IMPORT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
+    return result({ ...report, code: 'IMPORT_OK', backupTarget: 'CORE_IMPORT_SOURCES' });
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    if (reader) reader.close(); else await database?.close();
-    if (scratch) await rm(scratch, { recursive: true, force: true });
-    if (stageHome) await rm(stageHome, { recursive: true, force: true });
+    let cleanupFailed = false;
+    try { if (reader) reader.close(); else await database?.close(); } catch { cleanupFailed = true; }
+    for (const directory of [scratch, stageHome]) if (directory) {
+      try { await rm(directory, { recursive: true, force: true }); } catch { cleanupFailed = true; }
+    }
+    if (cleanupFailed && !primaryError) {
+      if (outcome) {
+        outcome.cleanupCode = 'IMPORT_CLEANUP_FAILED';
+        if (!committed && outcome.ok) { outcome.ok = false; outcome.code = 'IMPORT_CLEANUP_FAILED'; }
+      } else fail('IMPORT_CLEANUP_FAILED');
+    }
   }
 }
 

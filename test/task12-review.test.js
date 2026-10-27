@@ -12,15 +12,38 @@ import { resolveConfig } from '../src/config.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const verifier = join(repo, 'scripts/verify-local-install.ps1');
 const verify = (root, strict = false) => JSON.parse(spawnSync('pwsh', ['-NoProfile', '-File', verifier, '-DshHome', root, ...(strict ? ['-RequireActivated'] : [])], { encoding: 'utf8' }).stdout);
+function cleanupProbe(root, changeSource = false) {
+  const preload = join(root, 'cleanup-preload.mjs');
+  writeFileSync(preload, `import fsp from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
+import {writeFileSync} from 'node:fs';
+import {MemoryDatabase} from ${JSON.stringify(pathToFileURL(join(repo, 'src/storage/database.js')).href)};
+const oldRm=fsp.rm; fsp.rm=async (path,...args)=>{if(String(path).includes('.dafeiyu-import-'))throw Object.assign(new Error('sensitive cleanup detail'),{code:'EBUSY'}); return oldRm(path,...args)}; syncBuiltinESMExports();
+${changeSource ? `const oldOpen=MemoryDatabase.open;MemoryDatabase.open=async function(path,...args){const db=await oldOpen.call(this,path,...args);if(path.endsWith('memory.sqlite'))writeFileSync(${JSON.stringify(join(root, 'plugins-data/aurabot/chatlog/2026-10-27.jsonl'))},'changed source');return db};` : ''}`);
+  return spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, join(repo, 'scripts/import-existing.mjs'), '--dsh-home', root, '--apply'], { encoding: 'utf8' });
+}
 
 function home(t) { const root = mkdtempSync(join(tmpdir(), 'task12-review-')); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 function source(root, text = 'synthetic first') {
   const file = join(root, 'plugins-data/aurabot/chatlog/2026-10-27.jsonl'); mkdirSync(join(file, '..'), { recursive: true });
   writeFileSync(file, JSON.stringify({ t: 1800000000000, chatId: 'group:synthetic', uid: 'fixture', who: 'fixture', text })); return file;
 }
+test('CLI keeps committed import successful when staging cleanup returns EBUSY', t => {
+  const root = home(t); source(root); const result = cleanupProbe(root), report = JSON.parse(result.stdout);
+  const db = new DatabaseSync(join(root, 'dafeiyu-memory/memory.sqlite'), { readOnly: true });
+  try { assert.equal(db.prepare('SELECT count(*) AS n FROM memory_events').get().n, 1); } finally { db.close(); }
+  assert.equal(result.status, 0); assert.equal(report.ok, true); assert.equal(report.code, 'IMPORT_OK'); assert.equal(report.cleanupCode, 'IMPORT_CLEANUP_FAILED');
+  assert.doesNotMatch(result.stdout, /sensitive cleanup|task12-review-|[A-Z]:\\/);
+});
+test('CLI preserves the original pre-commit SOURCE_CHANGED when cleanup also returns EBUSY', t => {
+  const root = home(t); source(root); const result = cleanupProbe(root, true), report = JSON.parse(result.stdout);
+  assert.equal(result.status, 1); assert.equal(report.code, 'SOURCE_CHANGED'); assert.equal(existsSync(join(root, 'dafeiyu-memory')), false);
+  assert.doesNotMatch(result.stdout, /sensitive cleanup|task12-review-|[A-Z]:\\/);
+});
 test('actual import consumes only the preflight fingerprinted immutable source snapshot', async t => {
   const root = home(t); const file = source(root), original = readFileSync(file);
   const run = ImportManager.prototype.importExisting;
@@ -105,6 +128,29 @@ test('canonical pet patch with the exact allowed git status remains build-pendin
   assert.equal(prepared.status, 'pending'); assert.equal(prepared.details.code, 'BUILD_PENDING');
   writeFileSync(join(pet, 'extra.txt'), 'synthetic change');
   assert.equal(verify(root).checks.find(x => x.code === 'PET_PREPARED').status, 'fail');
+});
+test('pet verifier rejects each changed build artifact after actual canonical preparation', t => {
+  const root = home(t), pet = join(root, 'sources/dsh-pet-unified-memory'); mkdirSync(join(pet, 'src/host'), { recursive: true });
+  const git = args => execFileSync('git', ['-C', pet, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  for (const file of ['upstream-package.json', 'build-fixture.mjs']) writeFileSync(join(pet, file === 'upstream-package.json' ? 'package.json' : file), readFileSync(join(repo, 'test/fixtures/pet', file)));
+  writeFileSync(join(pet, '.gitignore'), 'lib/\nruntime/\nnode_modules/\n');
+  writeFileSync(join(pet, 'src/host/index.ts'), readFileSync(join(repo, 'test/fixtures/pet/upstream-chat-0.3.8.ts')));
+  git(['init', '-q']); git(['config', 'core.autocrlf', 'false']); git(['add', '.']); git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']); git(['tag', 'v0.3.8']);
+  git(['remote', 'add', 'origin', 'https://github.com/PC2005-cloud/dsh-pet.git']);
+  const prepare = spawnSync('pwsh', ['-NoProfile', '-File', join(repo, 'scripts/prepare-pet-source.ps1'), '-DshHome', root],
+    { encoding: 'utf8', timeout: 120000, env: { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false' } });
+  assert.equal(prepare.status, 0, prepare.stdout + prepare.stderr);
+  assert.equal(verify(root).checks.find(x => x.code === 'PET_PREPARED').status, 'pass');
+  const observed = [];
+  for (const path of ['lib/index.js', 'lib/types/index.d.ts', 'runtime/electron-helper/shared-core.js']) {
+    const file = join(pet, path), before = readFileSync(file); writeFileSync(file, Buffer.concat([before, Buffer.from('\n// tampered artifact\n')]));
+    observed.push(verify(root).checks.find(x => x.code === 'PET_PREPARED').status);
+    writeFileSync(file, before);
+  }
+  assert.deepEqual(observed, ['fail', 'fail', 'fail']);
+  const receipt = join(pet, '.git/dafeiyu-unified-memory-build.json');
+  if (existsSync(receipt)) rmSync(receipt);
+  assert.equal(verify(root).checks.find(x => x.code === 'PET_PREPARED').status, 'pending', 'legacy state without build receipt is not proof of successful build');
 });
 test('strict activation rejects registry versions and nonexistent paths containing a plausible pet directory name', t => {
   const root = home(t), profile = join(root, 'profiles/desktop/package.json'); mkdirSync(join(profile, '..'), { recursive: true });

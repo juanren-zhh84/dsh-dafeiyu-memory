@@ -148,4 +148,34 @@ try {
     Pop-Location
     $env:COREPACK_ENABLE_AUTO_PIN = $previousAutoPin
 }
+# A source-patch state is not a successful build. Publish a separate receipt only after both commands.
+Assert-Prepared $state
+$canonicalBridge = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '../integrations/dsh-pet/bridge.ts') -Raw).Replace("`r`n", "`n")
+$actualBridge = (Get-Content -LiteralPath (Join-Path $script:packageRoot 'src/host/unified-memory.ts') -Raw).Replace("`r`n", "`n")
+if ($canonicalBridge -cne $actualBridge) { throw 'PET_SOURCE_CANONICAL_MISMATCH' }
+$bridgeHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonicalBridge)))
+$prefix = if ($script:packageRelative) { "$script:packageRelative/" } else { '' }
+$artifacts = @('lib/index.js', 'lib/types/index.d.ts', 'runtime/electron-helper/shared-core.js') | ForEach-Object {
+    $path = Full-Path (Join-Path $script:packageRoot $_); Assert-NoLinks $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) { throw 'PET_SOURCE_BUILD_ARTIFACT_INVALID' }
+    @{ path = "$prefix$_"; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; size = (Get-Item -LiteralPath $path).Length }
+}
+$sources = @(@('src/host/index.ts', 'src/host/unified-memory.ts', 'src/host/unified-memory.test.ts') | ForEach-Object {
+    $path = Full-Path (Join-Path $script:packageRoot $_); Assert-NoLinks $path
+    @{ path = "$prefix$_"; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; size = (Get-Item -LiteralPath $path).Length }
+})
+$receipt = @{ version = 1; test = 'passed'; build = 'passed'; completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    patchHash = $script:patchHash; baseCommit = $script:baseCommit; tag = $Tag; remote = $Remote; packageRelative = $script:packageRelative
+    packageSha256 = (Get-FileHash -LiteralPath (Join-Path $script:packageRoot 'package.json') -Algorithm SHA256).Hash
+    bridgeSha256 = $bridgeHash; sources = $sources; artifacts = @($artifacts) }
+$receiptPath = Join-Path $script:destination '.git/dafeiyu-unified-memory-build.json'; Assert-NoLinks $receiptPath
+$receiptTemp = Join-Path $script:destination ('.git/dafeiyu-build-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+try {
+    [IO.File]::WriteAllText($receiptTemp, ($receipt | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    $stream = [IO.File]::Open($receiptTemp, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try { $stream.Flush($true) } finally { $stream.Dispose() }
+    [IO.File]::Move($receiptTemp, $receiptPath, $true)
+} finally {
+    if (Test-Path -LiteralPath $receiptTemp) { Remove-Item -LiteralPath $receiptTemp -Force }
+}
 Write-Output 'PET_SOURCE_READY'

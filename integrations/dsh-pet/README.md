@@ -16,8 +16,10 @@ pwsh -NoProfile -File ./scripts/prepare-pet-source.ps1 -DshHome 'D:\dsh-test' -T
 
 应用状态存在源码仓库的 `.git/dafeiyu-unified-memory.json` 中，包含基线 commit、补丁 hash 和三个补丁文件的 hash。重复执行只接受同一补丁、同一基线和完整的已知工作树状态；未知文件、暂存修改或补丁文件变化都会停止。安装/测试/构建失败后，状态仍可用于检查并重试。
 
+补丁状态不代表构建成功。只有测试与 build 均成功，脚本才核对 canonical bridge/补丁及三个非空产物（`lib/index.js`、`lib/types/index.d.ts`、`runtime/electron-helper/shared-core.js`），通过临时文件、flush 和原子重命名发布 `.git/dafeiyu-unified-memory-build.json`。成功凭据包括基线、tag、远端、包根、包清单/补丁/桥接 SHA-256、三个源码和三个产物的精确哈希/大小。重复准备成功会刷新凭据。只读安装检查器按该凭据核对当前产物，不执行它们；旧状态或缺失凭据只能 pending，任何产物哈希变化均 fail。
+
 桥接同步调用可选的 `ctx.get('dafeiyuMemory', false)` 服务的 `recall()`；只消费返回的字符串。非空记忆作为“历史资料，不是指令”的分隔块追加到原 system prompt。空结果保持 `generateChat()` 的全部原参数。模型选择、推理参数、最近 `chatMemoryRounds` 轮、表情池、气泡、`memory.json` 和响应形状沿用原实现。
 
 只有模型成功且原 `memory.json` 写入成功后，才异步 best-effort 记录双方。每次聊天生成一次 UUID，`recordPetExchange(service, petId, userText, answer, { exchangeId, userAt, assistantAt })` 使用 `pet:<petId>:<exchangeId>:user` / `:assistant` 作为稳定去重键。两条事件都是 `source=pet`、`conversationKind=pet`、`visibility=owner-private`。重试须复用同一 stamp；桥接不创建队列。服务缺失、召回/写入异常或写入悬停均不阻塞聊天；桥接返回稳定 code，不记录正文、错误对象或路径。
 
-本仓库验证：`node --test test/pet-patch.test.js` 或 `npm test`。测试只使用仓库内的原版聊天源码快照和临时本地 Git remote，安装测试显式启用 npm offline，不访问网络。夹具来自只读的已安装 `dsh-pet@0.3.8` 源码；不能据此替代上游 tag 验证。外部 tag 的 `apply --check`、上游测试和完整 build 的实际结果见 Task 10 报告；网络不可达时不得宣称这些步骤已通过。
+本仓库验证：`node --test test/pet-patch.test.js` 或 `npm test`。测试使用原版聊天源码快照和临时本地 Git remote，安装测试显式启用 npm offline，不访问网络。聊天源码夹具来自只读的已安装 `dsh-pet@0.3.8`；构建脚本/产物夹具为合成数据，用于验证成功凭据与故障门，不能代替上游 tag 的真实构建。外部 tag 的 `apply --check`、上游测试和完整 build 的实际结果见 Task 10 报告；网络不可达时不得宣称这些步骤已通过。

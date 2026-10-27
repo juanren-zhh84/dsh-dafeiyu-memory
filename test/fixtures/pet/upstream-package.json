@@ -1,1 +1,1 @@
-{"name":"dsh-pet","version":"0.3.8","scripts":{"test":"node -e \"process.exit(0)\"","build":"node -e \"process.exit(0)\""}}
+{"name":"dsh-pet","version":"0.3.8","scripts":{"test":"node -e \"process.exit(process.env.PET_TEST_FAIL ? 1 : 0)\"","build":"node build-fixture.mjs"}}

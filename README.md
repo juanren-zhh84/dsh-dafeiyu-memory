@@ -60,7 +60,7 @@ pwsh -NoProfile -File .\scripts\prepare-pet-source.ps1 -DshHome $DshHome
 
 脚本默认 clone 固定 `v0.3.8` 到 `$DSH_HOME/sources/dsh-pet-unified-memory`，核对包名/版本/tag/远端/工作区，应用本仓库补丁，安装锁定依赖并运行上游测试和构建。真实上游包位于其 `dsh-pet/` 子目录；以脚本检测出的含 `package.json` 的包目录作为 Electron 中 `dsh-pet` 本地源。网络、依赖或构建失败即停止，请勿在失败目录上手工覆盖补丁。
 
-成功输出 `PET_SOURCE_READY` 后，在 Electron 本地源管理中将 `dsh-pet` 切换到该源码包目录，然后重载插件。脚本不会做此切换。没有核心服务时仍使用上游 `memory.json` 路径；聊天失败不记录伪造的助手回复。更多细节见 [桌宠补丁说明](integrations/dsh-pet/README.md)。
+成功输出 `PET_SOURCE_READY` 后，在 Electron 本地源管理中将 `dsh-pet` 切换到该源码包目录，然后重载插件。脚本只有在测试和构建都成功、三项产物非空后，才原子写入 `.git/dafeiyu-unified-memory-build.json`，记录 canonical 源码/补丁/基线/包清单与精确产物 SHA-256。检查器只读核对该成功凭据及当前文件；只有旧补丁状态或缺少构建凭据时为 pending，产物变化为 fail，重复准备成功会刷新凭据。脚本不会做本地源切换。没有核心服务时仍使用上游 `memory.json` 路径；聊天失败不记录伪造的助手回复。更多细节见 [桌宠补丁说明](integrations/dsh-pet/README.md)。
 
 ## 现有数据：先 dry-run，再 apply
 
@@ -85,6 +85,8 @@ node --disable-warning=ExperimentalWarning .\scripts\import-existing.mjs --dsh-h
 ```
 
 apply 先运行同样的预检，再在 DSH_HOME 下创建同盘隔离 staging。预检文件集合、大小和 SHA-256 必须与 staging 来源快照完全相同，实际导入只消费该快照；所有批次和来源备份先在 staging 完成。发布前再次核对全部真实来源及目标库哈希：新目标一次重命名整个数据目录；已有目标先发布来源备份，最后通过同步哈希门后原子替换数据库文件。返回 `SOURCE_CHANGED` 时真实目标记录始终不变，新目标不留下半导入；失败 staging 自动清理。成功报告在数据库发布后才发布，报告失败以 `REPORT_FAILED` 单独表达。原始来源文件永不修改。报告只输出来源类别、计数、稳定 code 和时间，不输出原文、账号或绝对来源路径。任何来源失败时立即停止，不以覆盖、删除或重建异常目标“修复”。重复导入仍按 ledger 幂等跳过。
+
+数据库原子发布是提交点。提交后临时目录因占用而无法清理时，仍返回 `ok: true/code: IMPORT_OK` 并附 `cleanupCode: IMPORT_CLEANUP_FAILED`，不会把已提交数据误报失败；提交前的原始业务错误不会被清理错误覆盖。清理警告只含稳定 code，确认停机后再处理遗留 staging。
 
 ## 核验备份与回滚
 

@@ -117,12 +117,28 @@ try {
                 $artifact = Join-Path ([IO.Path]::GetDirectoryName($petPackage)) $relative; Assert-NoLinks $artifact
                 $valid = $valid -and (Test-Path -LiteralPath $artifact -PathType Leaf) -and (Get-Item -LiteralPath $artifact).Length -gt 0
             }
-            $compiled = Get-Content -LiteralPath $buildPath -Raw
-            $valid = $valid -and $compiled.Contains('PET_MEMORY_RECORDED') -and $compiled.Contains('PET_MEMORY_RECORD_FAILED') -and $compiled.Contains('dafeiyuMemory')
-            & node --check $buildPath 2>$null | Out-Null
-            $valid = $valid -and $LASTEXITCODE -eq 0
         }
-        Add-Check 'PET_PREPARED' $(if ($valid -and $built) { 'pass' } elseif ($valid) { 'pending' } else { 'fail' }) $true @{ version = $pet.version; code = $(if ($built) { 'BUILD_PRESENT' } else { 'BUILD_PENDING' }) }
+        $receiptPath = Join-Path $petRoot '.git/dafeiyu-unified-memory-build.json'; Assert-NoLinks $receiptPath
+        $hasReceipt = Test-Path -LiteralPath $receiptPath -PathType Leaf
+        if ($hasReceipt) {
+            $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            $valid = $valid -and $built -and $receipt.version -eq 1 -and $receipt.test -ceq 'passed' -and $receipt.build -ceq 'passed' -and $receipt.completedAt -gt 0
+            $valid = $valid -and $receipt.patchHash -eq $state.patchHash -and $receipt.baseCommit -ceq $head -and $receipt.tag -ceq 'v0.3.8' -and $receipt.remote -ceq $remote -and $receipt.packageRelative -ceq $state.packageRelative
+            $valid = $valid -and $receipt.packageSha256 -eq (Get-FileHash -LiteralPath $petPackage -Algorithm SHA256).Hash
+            $canonicalText = (Get-Content -LiteralPath (Join-Path $repo 'integrations/dsh-pet/bridge.ts') -Raw).Replace("`r`n", "`n")
+            $canonicalHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonicalText)))
+            $valid = $valid -and $receipt.bridgeSha256 -eq $canonicalHash
+            $expectedArtifacts = @("${prefix}lib/index.js", "${prefix}lib/types/index.d.ts", "${prefix}runtime/electron-helper/shared-core.js")
+            $valid = $valid -and @($receipt.sources).Count -eq 3 -and @(Compare-Object @($receipt.sources | ForEach-Object { $_.path }) $expectedFiles).Count -eq 0
+            $valid = $valid -and @($receipt.artifacts).Count -eq 3 -and @(Compare-Object @($receipt.artifacts | ForEach-Object { $_.path }) $expectedArtifacts).Count -eq 0
+            if ($valid) {
+                foreach ($file in @($receipt.sources) + @($receipt.artifacts)) {
+                    $path = Join-Path $petRoot $file.path; Assert-NoLinks $path
+                    $valid = $valid -and $file.size -gt 0 -and (Test-Path -LiteralPath $path -PathType Leaf) -and (Get-Item -LiteralPath $path).Length -eq $file.size -and (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $file.sha256
+                }
+            }
+        }
+        Add-Check 'PET_PREPARED' $(if ($valid -and $built -and $hasReceipt) { 'pass' } elseif ($valid) { 'pending' } else { 'fail' }) $true @{ version = $pet.version; code = $(if (-not $built) { 'BUILD_PENDING' } elseif (-not $hasReceipt) { 'BUILD_RECEIPT_MISSING' } elseif ($valid) { 'BUILD_VERIFIED' } else { 'BUILD_VERIFICATION_FAILED' }) }
     } else { Add-Check 'PET_PREPARED' 'pending' $true 'SOURCE_NOT_PREPARED' }
     $profile = Join-Path $DshHome 'profiles/desktop/package.json'; Assert-NoLinks $profile
     $coreRef = 'pending'; $petRef = 'pending'

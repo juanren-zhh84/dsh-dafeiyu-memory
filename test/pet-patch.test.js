@@ -17,6 +17,8 @@ function fixture(t, nested = false) {
   const packageRoot = nested ? join(dir, 'dsh-pet') : dir;
   mkdirSync(join(packageRoot, 'src/host'), { recursive: true });
   writeFileSync(join(packageRoot, 'package.json'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-package.json')));
+  writeFileSync(join(packageRoot, 'build-fixture.mjs'), readFileSync(resolve(root, 'test/fixtures/pet/build-fixture.mjs')));
+  writeFileSync(join(packageRoot, '.gitignore'), 'lib/\nruntime/\nnode_modules/\n');
   writeFileSync(join(packageRoot, 'src/host/index.ts'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-chat-0.3.8.ts')));
   run('git', ['init', '-q'], dir);
   run('git', ['config', 'core.autocrlf', 'false'], dir);
@@ -47,6 +49,7 @@ test('preparation supports the real tag layout with package inside dsh-pet/', t 
   mkdirSync(bin);
   writeFileSync(join(bin, 'corepack.ps1'), `param([Parameter(ValueFromRemainingArguments=$true)][string[]] $Rest)
 @{ cwd = (Get-Location).Path; args = @($Rest) } | ConvertTo-Json -Compress | Add-Content -LiteralPath $env:PET_COMMAND_TRACE
+if ($Rest[-1] -eq 'build') { & node (Join-Path (Get-Location).Path 'build-fixture.mjs'); exit $LASTEXITCODE }
 exit 0
 `);
   const env = { ...process.env, PET_COMMAND_TRACE: trace, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
@@ -69,6 +72,25 @@ exit 0
   ]);
   const repeated = invoke();
   assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
+});
+
+test('preparation publishes exact artifact receipt only after tests and build succeed, and refreshes it on repeat', t => {
+  const remote = fixture(t), home = mkdtempSync(join(tmpdir(), 'pet-receipt-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const target = join(home, 'sources/pet'), receipt = join(target, '.git/dafeiyu-unified-memory-build.json');
+  const invoke = extra => spawnSync('pwsh', ['-NoProfile', '-File', resolve(root, 'scripts/prepare-pet-source.ps1'), '-DshHome', home, '-Remote', remote, '-Target', target],
+    { encoding: 'utf8', timeout: 120000, env: { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false', ...extra } });
+  assert.notEqual(invoke({ PET_TEST_FAIL: '1' }).status, 0); assert.equal(existsSync(receipt), false);
+  assert.notEqual(invoke({ PET_BUILD_FAIL: '1' }).status, 0); assert.equal(existsSync(receipt), false);
+  assert.notEqual(invoke({ PET_BUILD_EMPTY: '1' }).status, 0); assert.equal(existsSync(receipt), false);
+  const first = invoke({}); assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.equal(existsSync(receipt), true, 'successful preparation must publish its build receipt');
+  const record = JSON.parse(readFileSync(receipt, 'utf8').replace(/^\uFEFF/, ''));
+  assert.equal(record.version, 1); assert.equal(record.test, 'passed'); assert.equal(record.build, 'passed');
+  assert.equal(record.sources.length, 3); assert.equal(record.artifacts.length, 3);
+  assert.ok(record.artifacts.every(x => /^[a-f\d]{64}$/i.test(x.sha256) && x.size > 0));
+  const repeat = invoke({}); assert.equal(repeat.status, 0, repeat.stdout + repeat.stderr);
+  assert.ok(JSON.parse(readFileSync(receipt, 'utf8').replace(/^\uFEFF/, '')).completedAt > record.completedAt);
 });
 
 test('patch changes only host hook, canonical bridge and upstream tests; bridge matches normalized text', t => {
