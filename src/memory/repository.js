@@ -241,7 +241,7 @@ export class MemoryRepository {
         const sources = new Map(candidates.map(({ id, version }) => {
           const row = db.prepare('SELECT * FROM memory_events WHERE id = ?').get(id);
           if (!row || !['active', 'review-pending'].includes(row.state) || row.version !== version
-            || (lease && (row.state !== 'review-pending' || row.review_due_at > now))) fail('MEMORY_CONFLICT');
+            || (lease && row.review_due_at > now)) fail('MEMORY_CONFLICT');
           return [id, row];
         }));
         const expiresAt = addDays(now, this.config.longTermDays);

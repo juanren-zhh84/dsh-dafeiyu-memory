@@ -56,7 +56,10 @@ export class ReviewLifecycle {
         let group;
         const flush = () => { if (batch.length) createJob('short-term', batch); batch = []; };
         for (const row of db.prepare(`SELECT id, version, conversation_kind, conversation_key, review_due_at FROM memory_events
-          WHERE state='active' AND review_due_at<=? ORDER BY conversation_kind,conversation_key,occurred_at,id`).all(now)) {
+          WHERE state='active' AND review_due_at<=? AND NOT EXISTS (
+            SELECT 1 FROM review_jobs AS job,json_each(job.source_ids_json) AS source
+            WHERE job.kind='short-term' AND job.state IN ('queued','leased') AND source.value=memory_events.id
+          ) ORDER BY conversation_kind,conversation_key,occurred_at,id`).all(now)) {
           const key = JSON.stringify([row.conversation_kind, row.conversation_key]);
           if (key !== group || batch.length >= maximum) flush();
           group = key; batch.push(row);
@@ -100,7 +103,7 @@ export class ReviewLifecycle {
       const now = timestamp(this.clock.now());
       const rows = JSON.parse(job.source_ids_json).map((id) => {
         const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
-        if (!row || !(short ? row.state === 'review-pending' && row.review_due_at <= now
+        if (!row || !(short ? ['active', 'review-pending'].includes(row.state) && row.review_due_at <= now
           : row.state === 'active' && row.expires_at <= now)) throw safeError('MEMORY_CONFLICT');
         return row;
       });

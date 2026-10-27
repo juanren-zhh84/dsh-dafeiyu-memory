@@ -192,6 +192,82 @@ for (const state of ['queued', 'leased', 'failed']) test(`long-term old-version 
   assert.equal(jobs.find((j) => j.id === oldJob.id).state, state);
 });
 
+for (const state of ['queued', 'leased']) test(`short-term old ${state} job excludes restored events and reloads active latest versions without worker overlap`, async (t) => {
+  const entered = deferred(); const unblock = deferred();
+  const s = await setup(t, { review: async (input) => { entered.resolve(); await unblock.promise; return discardAll(input); } });
+  const other = new ReviewLifecycle(s.options);
+  t.after(async () => { unblock.resolve(); await other.dispose(); });
+  const event = await s.repository.insertEvent(eventInput()); s.time.value += 7 * DAY;
+  await s.lifecycle.scan(); const oldJob = s.rows('review_jobs')[0];
+  if (state === 'leased') await s.database.write((db) => db.prepare("UPDATE review_jobs SET state='leased',attempts=1,lease_until=? WHERE id=?")
+    .run(s.time.value + s.config.reviewLeaseMs, oldJob.id));
+  await s.repository.moveToRecycle({ kind: 'event', id: event.id, version: event.version });
+  const restored = await s.repository.restoreRecycle({ kind: 'event', id: event.id, version: event.version + 1 });
+  assert.equal(restored.version, 3); assert.equal(restored.state, 'active');
+  const scans = await Promise.all([s.lifecycle.scan(), other.scan()]);
+  assert.deepEqual(scans, [{ queued: 0 }, { queued: 0 }]);
+  assert.equal(s.rows('review_jobs').length, 1);
+  if (state === 'leased') {
+    assert.deepEqual(await other.runDueReviews(), { queued: 0, completed: 0, retried: 0, failed: 0 });
+    assert.equal(s.calls.length, 0); s.time.value += s.config.reviewLeaseMs;
+  }
+  const running = s.lifecycle.runDueReviews();
+  await Promise.race([entered.promise, running.then(() => assert.fail('the old job must load the restored active event'))]);
+  assert.equal(s.calls.length, 1);
+  assert.equal(s.calls[0].candidates[0].version, restored.version);
+  assert.equal(s.rows('memory_events')[0].state, 'active');
+  assert.deepEqual(await other.runDueReviews(), { queued: 0, completed: 0, retried: 0, failed: 0 });
+  assert.equal(s.calls.length, 1); assert.equal(s.rows('review_jobs').length, 1);
+  unblock.resolve();
+  assert.deepEqual(await running, { queued: 0, completed: 1, retried: 0, failed: 0 });
+  assert.equal(s.rows('review_jobs')[0].id, oldJob.id);
+  assert.equal(s.rows('review_jobs')[0].state, 'completed');
+  assert.equal(s.rows('memory_events')[0].state, 'recycle');
+  assert.equal(s.rows('memory_events')[0].version, restored.version + 1);
+});
+
+test('short-term old failed job permits a restored new version while retaining the failed audit row', async (t) => {
+  const s = await setup(t);
+  const event = await s.repository.insertEvent(eventInput()); s.time.value += 7 * DAY;
+  await s.lifecycle.scan(); const oldJob = s.rows('review_jobs')[0];
+  await s.database.write((db) => db.prepare("UPDATE review_jobs SET state='failed' WHERE id=?").run(oldJob.id));
+  await s.repository.moveToRecycle({ kind: 'event', id: event.id, version: event.version });
+  await s.repository.restoreRecycle({ kind: 'event', id: event.id, version: event.version + 1 });
+  assert.deepEqual(await s.lifecycle.scan(), { queued: 1 });
+  assert.deepEqual(await s.lifecycle.scan(), { queued: 0 });
+  assert.deepEqual(await s.lifecycle.runDueReviews(), { queued: 0, completed: 1, retried: 0, failed: 0 });
+  assert.equal(s.calls.length, 1); assert.equal(s.calls[0].candidates[0].version, 3);
+  assert.equal(s.rows('review_jobs').find((j) => j.id === oldJob.id).state, 'failed');
+  assert.equal(s.rows('review_jobs').length, 2);
+});
+
+test('restoring during a leased model call rejects its old snapshot and retries the active latest version in the same job', async (t) => {
+  const entered = deferred(); const unblock = deferred();
+  const s = await setup(t, { review: async (input) => {
+    if (s.calls.length === 1) { entered.resolve(); await unblock.promise; }
+    return discardAll(input);
+  } });
+  const other = new ReviewLifecycle(s.options);
+  t.after(async () => { unblock.resolve(); await other.dispose(); });
+  const event = await s.repository.insertEvent(eventInput()); s.time.value += 7 * DAY;
+  const running = s.lifecycle.runDueReviews(); await entered.promise;
+  const oldJob = s.rows('review_jobs')[0];
+  await s.repository.moveToRecycle({ kind: 'event', id: event.id, version: 1 });
+  await s.repository.restoreRecycle({ kind: 'event', id: event.id, version: 2 });
+  assert.deepEqual(await other.runDueReviews(), { queued: 0, completed: 0, retried: 0, failed: 0 });
+  assert.equal(s.calls.length, 1);
+  unblock.resolve();
+  assert.deepEqual(await running, { queued: 1, completed: 0, retried: 1, failed: 0 });
+  assert.equal(s.rows('memory_events')[0].state, 'active');
+  assert.equal(s.rows('memory_events')[0].version, 3);
+  assert.equal(s.rows('review_jobs')[0].last_error_code, 'MEMORY_CONFLICT');
+  s.time.value = s.rows('review_jobs')[0].next_attempt_at;
+  assert.deepEqual(await other.runDueReviews(), { queued: 0, completed: 1, retried: 0, failed: 0 });
+  assert.equal(s.calls.length, 2); assert.equal(s.calls[1].candidates[0].version, 3);
+  assert.equal(s.rows('review_jobs').length, 1); assert.equal(s.rows('review_jobs')[0].id, oldJob.id);
+  assert.equal(s.rows('memory_events')[0].state, 'recycle');
+});
+
 for (const failure of ['model', 'protocol', 'transaction', 'version']) test(`${failure} failure changes only job retry state and reloads candidates on retry`, async (t) => {
   let first = true;
   let s;
