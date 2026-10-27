@@ -4,8 +4,8 @@
   "description": "大肥鱼统一记忆插件",
   "type": "module",
   "main": "./src/index.js",
-  "exports": { ".": "./src/index.js", "./package.json": "./package.json" },
-  "files": ["src/", "cordis.patch.yml"],
+  "exports": { ".": "./src/index.js", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["src/", "cordis.patch.yml", "client.js"],
   "engines": { "node": ">=24.22.0" },
   "scripts": { "test": "node --test test/*.test.js" },
   "peerDependencies": {
@@ -24,5 +24,5 @@
     "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2"
   },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-settings"] } }
 }

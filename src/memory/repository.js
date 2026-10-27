@@ -231,6 +231,20 @@ export class MemoryRepository {
     });
   }
 
+  promoteItemToDiary(input) {
+    return this.#mutate(() => {
+      const data = ownObject(input, ['id']);
+      const id = text(data.id, LIMIT.key);
+      return (db) => {
+        const item = db.prepare('SELECT * FROM memory_items WHERE id=?').get(id);
+        if (!item) fail('MEMORY_REFERENCE_NOT_FOUND');
+        if (item.state !== 'active') fail('MEMORY_CONFLICT');
+        return appendDiaryRow(db, { title: '手写日记', body: item.content, visibility: item.visibility,
+          sourceRefs: [id], supersedesId: null }, text(this.idGenerator(), LIMIT.key), integer(this.clock.now()));
+      };
+    });
+  }
+
   promoteEvents(input) {
     return this.#mutate(() => {
       const data = ownObject(input, ['jobId', 'candidates', 'retain', 'diary', 'discard', 'lease']);

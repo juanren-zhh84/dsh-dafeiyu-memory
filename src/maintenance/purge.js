@@ -26,15 +26,28 @@ export class PurgeManager {
     return this.database.writeQueue.enqueue(() => this.runUnlocked(target));
   }
 
-  async runUnlocked(input) {
+  runManual(input) {
+    let target;
+    try { target = snapshotTarget(input); if (!target) throw new Error(); }
+    catch { return Promise.reject(maintenanceError('MEMORY_INVALID_INPUT')); }
+    return this.database.writeQueue.enqueue(() => this.runUnlocked(target, true));
+  }
+
+  async runUnlocked(input, manual = false) {
     try {
       input = snapshotTarget(input);
       const now = this.clock.now();
+      if (manual) {
+        const table = input.kind === 'event' ? 'memory_events' : 'memory_items';
+        const current = this.database.read((db) => db.prepare(`SELECT state,version FROM ${table} WHERE id=?`).get(input.id));
+        if (current && (current.state !== 'recycle' || (input.version !== undefined && current.version !== input.version))) throw maintenanceError('MEMORY_CONFLICT');
+      }
+      const expiry = manual ? '1' : 'purge_due_at <= ?';
       const target = input ? 'WHERE kind = ? AND id = ?' + (input.version === undefined ? '' : ' AND version = ?') : '';
-      const params = [now, now, ...(input ? [input.kind, input.id, ...(input.version === undefined ? [] : [input.version])] : []), this.config.purgeBatchSize];
+      const params = [...(manual ? [] : [now, now]), ...(input ? [input.kind, input.id, ...(input.version === undefined ? [] : [input.version])] : []), this.config.purgeBatchSize];
       const rows = this.database.read((db) => db.prepare(`SELECT * FROM (SELECT 'event' AS kind, id, external_key AS source_key, version, purge_due_at FROM memory_events
-        WHERE state = 'recycle' AND purge_due_at <= ?
-        UNION ALL SELECT 'item', id, id, version, purge_due_at FROM memory_items WHERE state = 'recycle' AND purge_due_at <= ?)
+        WHERE state = 'recycle' AND ${expiry}
+        UNION ALL SELECT 'item', id, id, version, purge_due_at FROM memory_items WHERE state = 'recycle' AND ${expiry})
         ${target} ORDER BY purge_due_at, kind, id LIMIT ?`).all(...params));
       if (!rows.length) return { deleted: 0 };
       await this.backupManager.createUnlocked('purge');
@@ -42,12 +55,13 @@ export class PurgeManager {
         let count = 0;
         for (const row of rows) {
           const table = row.kind === 'event' ? 'memory_events' : 'memory_items';
-          if (!db.prepare(`SELECT id FROM ${table} WHERE id = ? AND state = 'recycle' AND purge_due_at <= ? AND version = ?`)
-            .get(row.id, now, row.version)) continue;
+          const check = [row.id, ...(manual ? [] : [now]), row.version];
+          if (!db.prepare(`SELECT id FROM ${table} WHERE id = ? AND state = 'recycle' AND ${expiry} AND version = ?`)
+            .get(...check)) continue;
           const hash = createHash('sha256').update(`${row.kind}\0${row.source_key}`).digest('hex');
           db.prepare('INSERT OR IGNORE INTO purge_ledger (source_hash, object_kind, purged_at) VALUES (?, ?, ?)').run(hash, row.kind, now);
           db.prepare('DELETE FROM memory_recall_days WHERE memory_type = ? AND memory_id = ?').run(row.kind, row.id);
-          count += Number(db.prepare(`DELETE FROM ${table} WHERE id = ? AND state = 'recycle' AND purge_due_at <= ? AND version = ?`).run(row.id, now, row.version).changes);
+          count += Number(db.prepare(`DELETE FROM ${table} WHERE id = ? AND state = 'recycle' AND ${expiry} AND version = ?`).run(...check).changes);
         }
         return count;
       });
@@ -55,7 +69,7 @@ export class PurgeManager {
       return { deleted };
     } catch (error) {
       const code = safeErrorCode(error);
-      if (['MEMORY_BACKUP_FAILED', 'MEMORY_INVALID_INPUT'].includes(code)) throw maintenanceError(code);
+      if (['MEMORY_BACKUP_FAILED', 'MEMORY_INVALID_INPUT', 'MEMORY_CONFLICT'].includes(code)) throw maintenanceError(code);
       throw maintenanceError('MEMORY_PURGE_FAILED');
     }
   }

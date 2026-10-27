@@ -10,6 +10,7 @@ import { PurgeManager } from './maintenance/purge.js';
 import { CapacityManager } from './maintenance/capacity.js';
 import { EventSpool } from './maintenance/spool.js';
 import { ImportManager } from './importers/index.js';
+import { managementDetail, managementSearch } from './management/projection.js';
 
 export class DafeiyuMemoryService extends Service {
   constructor(ctx, { config, paths, database, repository, clock, idGenerator, reviewModel, timer, maintenance = {} }) {
@@ -57,12 +58,20 @@ export class DafeiyuMemoryService extends Service {
   }
 
   async recordEvent(input) { assertReady(this); return this.repository.insertEvent(input); }
-  async search() { return unavailable(this, 'search'); }
+  async search(input) { assertReady(this); return managementSearch(this.database, input); }
+  async detail(input) { assertReady(this); return managementDetail(this.database, input); }
   async importExisting(options) { assertReady(this); return this.importManager.importExisting(options); }
   async runDueReviews() { assertReady(this); return this.reviewLifecycle.runDueReviews(); }
   async backup() { assertReady(this); return this.backupManager.create(); }
   async restoreRecycleItem(input) { assertReady(this); return this.repository.restoreRecycle(input); }
-  async purgeRecycleItem(input) { assertReady(this); return this.purgeManager.run(input); }
+  async purgeRecycleItem(input, confirmation) {
+    assertReady(this);
+    if (confirmation !== undefined) {
+      if (confirmation !== `永久删除 ${input?.id}`) throw memoryError('MEMORY_INVALID_INPUT', 'Invalid memory input');
+      return this.purgeManager.runManual(input);
+    }
+    return this.purgeManager.run(input);
+  }
   async promoteToDiary(input) { assertReady(this); return this.repository.appendDiary(input); }
   async runMaintenance() { assertReady(this); return this.capacityManager.run(); }
   async enqueueSpool(input) { assertReady(this); return this.spool.enqueue(input); }
@@ -75,11 +84,6 @@ export class DafeiyuMemoryService extends Service {
     await this.spool.settle();
     await this.database.close();
   }
-}
-
-function unavailable(service, method) {
-  assertReady(service);
-  throw memoryError('MEMORY_NOT_IMPLEMENTED', `Memory operation is not implemented: ${method}`);
 }
 
 function assertReady(service) {

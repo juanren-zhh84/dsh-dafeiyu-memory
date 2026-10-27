@@ -4,6 +4,7 @@ import { DafeiyuMemoryService } from './service.js';
 import { MemoryDatabase } from './storage/database.js';
 import { BackupManager } from './maintenance/backup.js';
 import { WriteQueue } from './storage/write-queue.js';
+import { registerManagementRoutes } from './management/routes.js';
 
 export const name = 'dafeiyu-memory';
 export const inject = ['llm', 'agentDefaultModel'];
@@ -25,6 +26,9 @@ export async function apply(ctx, config = {}, dependencies = {}) {
       service.scheduler.start();
       return () => service.dispose();
     });
+    // The optional webserver can appear/disappear without restarting the core.
+    if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (webCtx) => registerManagementRoutes(webCtx, service));
+    else registerManagementRoutes(ctx, service);
   } catch (error) {
     await database.close();
     throw error;

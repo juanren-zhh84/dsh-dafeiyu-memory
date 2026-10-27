@@ -48,7 +48,7 @@ test('effect disposal rejects all new writes and dispose is idempotent', async (
   assert.equal(service.status().state, 'disposed');
 });
 
-test('unimplemented asynchronous operations fail explicitly instead of reporting success', async () => {
+test('management search rejects missing context and succeeds only with explicit management context', async () => {
   const ctx = createFakeContext();
   await apply(ctx, {}, { dshHome: createTempHome() });
   const service = ctx.get('dafeiyuMemory');
@@ -57,8 +57,9 @@ test('unimplemented asynchronous operations fail explicitly instead of reporting
   ]) {
     const operation = service[name]({});
     assert.ok(operation instanceof Promise, `${name} returns a Promise`);
-    await assert.rejects(operation, { code: 'MEMORY_NOT_IMPLEMENTED' });
+    await assert.rejects(operation, { code: 'MEMORY_INVALID_INPUT' });
   }
+  assert.deepEqual(await service.search({ context: 'management', query: '' }), { items: [], hasMore: false, offset: 0 });
   assert.equal(service.recall({}), '');
   await service.dispose();
 });
