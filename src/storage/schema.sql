@@ -99,3 +99,11 @@ CREATE INDEX memory_items_subject ON memory_items (subject_key, state, promoted_
 CREATE INDEX diary_entries_written ON diary_entries (visibility, written_at);
 CREATE INDEX review_jobs_due ON review_jobs (state, due_at, next_attempt_at);
 CREATE INDEX review_jobs_lease ON review_jobs (state, lease_until);
+-- Schema version 2
+CREATE TABLE memory_recall_days (
+  memory_type TEXT NOT NULL CHECK (memory_type IN ('event', 'item', 'diary')),
+  memory_id TEXT NOT NULL,
+  recalled_day INTEGER NOT NULL CHECK (recalled_day >= 0),
+  PRIMARY KEY (memory_type, memory_id, recalled_day)
+) STRICT;
+CREATE INDEX memory_recall_days_target ON memory_recall_days (memory_type, memory_id);

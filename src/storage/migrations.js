@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { memoryError } from '../contracts.js';
 
+const [schemaV1, schemaV2] = readFileSync(new URL('./schema.sql', import.meta.url), 'utf8').split('-- Schema version 2');
+
 export const MIGRATIONS = Object.freeze([
-  Object.freeze({ version: 1, sql: readFileSync(new URL('./schema.sql', import.meta.url), 'utf8') }),
+  Object.freeze({ version: 1, sql: schemaV1 }),
+  Object.freeze({ version: 2, sql: schemaV2 }),
 ]);
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -1,6 +1,7 @@
 import { Service } from '@deepseek-ai/cordis';
 import { MEMORY_SERVICE_NAME, memoryError } from './contracts.js';
 import { MemoryRepository } from './memory/repository.js';
+import { RecallEngine } from './memory/recall.js';
 
 export class DafeiyuMemoryService extends Service {
   constructor(ctx, { config, paths, database, repository, clock, idGenerator }) {
@@ -10,12 +11,13 @@ export class DafeiyuMemoryService extends Service {
     this.database = database;
     this.writeQueue = database.writeQueue;
     this.repository = repository ?? new MemoryRepository({ database, writeQueue: this.writeQueue, config, clock, idGenerator });
+    this.recallEngine = new RecallEngine({ database, writeQueue: this.writeQueue, clock });
     this.state = 'ready';
   }
 
-  recall() {
+  recall(request) {
     if (this.state === 'disposed') throw memoryError('MEMORY_DISPOSED', 'Memory service is disposed');
-    return '';
+    return this.recallEngine.recall(request).text;
   }
 
   status() {

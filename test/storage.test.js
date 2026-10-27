@@ -39,14 +39,14 @@ test('first open creates all STRICT tables and required connection settings', as
   database.read((db) => {
     const tables = db.prepare('PRAGMA table_list').all().filter((row) => !row.name.startsWith('sqlite_'));
     assert.deepEqual(tables.map((row) => row.name).sort(), [
-      'diary_entries', 'import_ledger', 'memory_events', 'memory_items', 'purge_ledger', 'review_jobs', 'schema_meta',
+      'diary_entries', 'import_ledger', 'memory_events', 'memory_items', 'memory_recall_days', 'purge_ledger', 'review_jobs', 'schema_meta',
     ]);
     assert.ok(tables.every((row) => row.strict === 1));
-    for (const [pragma, value] of [['foreign_keys', 1], ['journal_mode', 'wal'], ['busy_timeout', 5000], ['auto_vacuum', 2], ['user_version', 1]]) {
+    for (const [pragma, value] of [['foreign_keys', 1], ['journal_mode', 'wal'], ['busy_timeout', 5000], ['auto_vacuum', 2], ['user_version', 2]]) {
       assert.equal(Object.values(db.prepare(`PRAGMA ${pragma}`).get())[0], value, pragma);
     }
     const indexes = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'index'").all();
-    for (const name of ['memory_events_due', 'memory_events_conversation', 'memory_items_due', 'diary_entries_written', 'review_jobs_due']) {
+    for (const name of ['memory_events_due', 'memory_events_conversation', 'memory_items_due', 'diary_entries_written', 'review_jobs_due', 'memory_recall_days_target']) {
       assert.ok(indexes.some((index) => index.name === name), name);
     }
   });
@@ -402,7 +402,7 @@ test('existing legacy databases require a completed backup before any migration 
   const opening = MemoryDatabase.open(path, { beforeMigrate: async (context) => {
     assert.equal(context.path, path);
     assert.equal(context.currentVersion, 0);
-    assert.equal(context.targetVersion, 1);
+    assert.equal(context.targetVersion, 2);
     assert.equal(context.database.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'memory_events'").get().count, 0);
     backupStarted = true;
     await gate;
@@ -466,4 +466,45 @@ test('migrations advance sequentially from the current version and reject gaps b
   assert.equal(db.prepare('SELECT value FROM second').get().value, 'ordered');
   assert.throws(() => migrate(db, [{ version: 5, sql: 'DROP TABLE second' }]), { code: 'MEMORY_INVALID_MIGRATION' });
   assert.equal(db.prepare('SELECT value FROM second').get().value, 'ordered');
+});
+
+test('v1 upgrade requires completed backup, preserves rows and migrates once to v2', async (t) => {
+  const path = join(createTempHome(), 'v1.sqlite');
+  const old = new DatabaseSync(path);
+  const schema = readFileSync(new URL('../src/storage/schema.sql', import.meta.url), 'utf8').split('-- Schema version 2')[0];
+  old.exec(schema);
+  old.exec('PRAGMA user_version = 1');
+  insertEvent(old);
+  old.close();
+  await assert.rejects(MemoryDatabase.open(path), { code: 'MEMORY_MIGRATION_BACKUP_REQUIRED' });
+  let backups = 0;
+  const upgraded = await MemoryDatabase.open(path, { beforeMigrate: async ({ database, currentVersion, targetVersion }) => {
+    backups++;
+    assert.equal(currentVersion, 1);
+    assert.equal(targetVersion, 2);
+    assert.equal(database.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'memory_recall_days'").get().count, 0);
+  } });
+  upgraded.read((db) => {
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM memory_events').get().count, 1);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM memory_recall_days').get().count, 0);
+  });
+  await upgraded.close();
+  const reopened = await MemoryDatabase.open(path, { beforeMigrate: () => { backups++; } });
+  t.after(() => reopened.close());
+  assert.equal(backups, 1);
+});
+
+test('recall days enforce typed targets, nonnegative UTC days and per-day uniqueness', async (t) => {
+  const { database } = await openDatabase(t);
+  database.transaction((db) => {
+    const insert = db.prepare('INSERT INTO memory_recall_days VALUES (?, ?, ?)');
+    insert.run('event', 'event-1', 20_000);
+    assert.throws(() => insert.run('event', 'event-1', 20_000), /UNIQUE/);
+    insert.run('item', 'event-1', 20_000);
+    insert.run('diary', 'diary-1', 20_001);
+    assert.throws(() => insert.run('bad', 'id', 20_000), /CHECK/);
+    assert.throws(() => insert.run('event', 'id', -1), /CHECK/);
+    assert.throws(() => insert.run('event', 'id', 'today'), /INTEGER/);
+  });
 });
