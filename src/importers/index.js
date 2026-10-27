@@ -228,6 +228,7 @@ export class ImportManager {
   #plan(db, source, records, seen) {
     let skipped = 0, planned = 0;
     for (const record of records) {
+      if (record.inactive) { skipped++; seen.add(record.externalKey); continue; }
       const externalKey = record.type === 'event' ? JSON.stringify([record.value.source, record.value.sourceKey]) : null;
       const exists = externalKey && (db.prepare('SELECT 1 FROM memory_events WHERE external_key=?').get(externalKey)
         || db.prepare("SELECT 1 FROM purge_ledger WHERE source_hash=? AND object_kind='event'").get(fingerprint(`event\0${externalKey}`)));

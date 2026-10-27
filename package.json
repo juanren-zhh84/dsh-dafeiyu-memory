@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./src/index.js",
   "exports": { ".": "./src/index.js", "./client": "./client.js", "./package.json": "./package.json" },
-  "files": ["src/", "cordis.patch.yml", "client.js"],
+  "files": ["src/", "cordis.patch.yml", "client.js", "README.md", "aurabot-module/", "integrations/dsh-pet/", "scripts/install-aurabot-module.ps1", "scripts/prepare-pet-source.ps1", "scripts/verify-local-install.ps1", "scripts/import-existing.mjs", "scripts/inspect-local-database.mjs"],
   "engines": { "node": ">=24.22.0" },
   "scripts": { "test": "node --test test/*.test.js" },
   "peerDependencies": {

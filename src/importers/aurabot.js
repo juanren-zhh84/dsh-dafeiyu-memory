@@ -7,13 +7,18 @@ export function parseAurabot(bytes, logical, config) {
     return lines.flatMap((line, index) => {
       if (!line.trim()) return [];
       const row = object(json(Buffer.from(line))), at = time(row.t), chatId = text(row.chatId, 512);
-      const kind = /^(group|private|system):.+/.exec(chatId)?.[1]; if (!kind) invalid();
+      // qzone-social calls hub.logChat('qzone', ...): this is a feed, not a private/group conversation.
+      // Keep an inactive ledger receipt, never infer an audience or import its body.
+      const nonChat = chatId === 'qzone';
+      const kind = nonChat ? 'system' : /^(group|private|system):.+/.exec(chatId)?.[1]; if (!kind) invalid();
       const outgoing = row.who === 'bot' && !row.uid;
+      const originalText = text(row.text, 16000);
       const value = { source: 'qq', conversationKind: kind, conversationKey: chatId,
         actorKey: outgoing ? 'qq:bot' : `qq:${text(row.uid, 480, 'unknown')}`, actorName: text(row.who, 200, ''),
-        direction: outgoing ? 'outgoing' : 'incoming', contentText: text(row.text, 16000), occurredAt: at,
+        direction: outgoing ? 'outgoing' : 'incoming', contentText: originalText.trim() ? originalText : '[空消息]', occurredAt: at,
         visibility: kind === 'group' ? 'group' : kind === 'private' && row.owner === true ? 'owner-private' : 'conversation' };
-      return [record('event', value, { logical, index, originalTime: at, stableId: row.messageId ?? row.id, config })];
+      const entry = record('event', value, { logical, index, originalTime: at, stableId: row.messageId ?? row.id, config });
+      return [nonChat ? { ...entry, inactive: true, value: undefined } : entry];
     });
   }
   const root = object(json(bytes));

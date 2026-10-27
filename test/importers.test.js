@@ -52,6 +52,36 @@ test('Aurabot preserves ages, safe visibility, permanent diary and a fresh full 
   assert.equal(source(report, 'pet').status, 'skipped');
 });
 
+test('Aurabot writer empty text matches live connector and known non-chat qzone rows stay skipped', async t => {
+  const c = await setup(t);
+  const path = join(c.sources.aurabot, 'chatlog', 'recent.jsonl');
+  const rows = [
+    { t: NOW, chatId: 'group:synthetic', who: 'fixture', uid: 'synthetic', text: '' },
+    { t: NOW + 1, chatId: 'private:synthetic', who: 'fixture', uid: 'synthetic', text: ' \t ' },
+    { t: NOW + 2, chatId: 'qzone', who: 'fixture', uid: 'synthetic', text: 'synthetic qzone content' },
+  ];
+  await put(path, rows.map(JSON.stringify).join('\n'));
+  const before = digest(await fs.readFile(path));
+  const planned = await c.manager.importExisting({ dryRun: true, sources: { aurabot: c.sources.aurabot } });
+  assert.equal(planned.ok, true); assert.equal(source(planned, 'aurabot').planned, 2); assert.equal(source(planned, 'aurabot').skipped, 1);
+  const imported = await c.manager.importExisting({ sources: { aurabot: c.sources.aurabot } });
+  assert.equal(imported.ok, true); assert.equal(source(imported, 'aurabot').imported, 2); assert.equal(source(imported, 'aurabot').skipped, 1);
+  assert.ok(c.rows('memory_events').every(x => x.content_text === '[空消息]'));
+  assert.ok(c.rows('memory_events').every(x => x.conversation_key !== 'qzone'));
+  assert.equal(c.rows('import_ledger').filter(x => x.result === 'skipped-inactive').length, 1);
+  const again = await c.manager.importExisting({ sources: { aurabot: c.sources.aurabot } });
+  assert.equal(source(again, 'aurabot').imported, 0); assert.equal(c.rows('import_ledger').length, 3);
+  assert.equal(digest(await fs.readFile(path)), before);
+});
+
+test('Aurabot unrecognized conversation prefixes remain fail closed instead of becoming public or group', async t => {
+  const c = await setup(t);
+  await put(join(c.sources.aurabot, 'chatlog', 'recent.jsonl'), JSON.stringify({ t: NOW, chatId: 'unknown:synthetic', who: 'fixture', uid: 'synthetic', text: 'synthetic' }));
+  const report = await c.manager.importExisting({ sources: { aurabot: c.sources.aurabot } });
+  assert.equal(report.ok, false); assert.equal(source(report, 'aurabot').code, 'INVALID_SOURCE');
+  assert.equal(c.rows('memory_events').length, 0); assert.equal(c.rows('import_ledger').length, 0);
+});
+
 test('dryRun validates and plans without creating backups, reports, ledger or memory rows', async t => {
   const c = await setup(t); await qqFixture(c.sources);
   const before = await tree(c.home);
