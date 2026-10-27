@@ -64,6 +64,26 @@ test('search requires explicit management scope, returns metadata only, detail i
   assert.equal((await s.request('/detail', { context: 'management', kind: 'event', id: 'absent' })).status, 404);
 });
 
+test('public detail rejects non-string kinds without executing conversion hooks', async (t) => {
+  const s = await setup(t);
+  const diary = await s.service.promoteToDiary({ title: '合成日记', body: '不可由畸形类型取得的正文' });
+  let converted = 0;
+  const coercible = { [Symbol.toPrimitive]() { converted++; return 'diary'; }, toString() { converted++; return 'diary'; } };
+  for (const kind of [coercible, ['diary'], new String('diary'), {}, null, true, 1, Symbol('diary')]) {
+    await assert.rejects(s.service.detail({ context: 'management', kind, id: diary.id }), { code: 'MEMORY_INVALID_INPUT' });
+  }
+  assert.equal(converted, 0);
+});
+
+test('detail route returns code-only 400 for arrays, objects and invalid kind scalars', async (t) => {
+  const s = await setup(t);
+  const diary = await s.service.promoteToDiary({ title: '合成日记', body: '只允许合法单条展开' });
+  for (const kind of [['diary'], ['event'], {}, { toString: 'diary' }, null, true, 1, '__proto__', 'constructor']) {
+    assert.deepEqual(await s.request('/detail', { context: 'management', kind, id: diary.id }),
+      { status: 400, body: { code: 'MEMORY_INVALID_INPUT' } });
+  }
+});
+
 test('every write is POST only and hostile requests produce stable code-only errors', async (t) => {
   const s = await setup(t);
   for (const path of ['/search', '/detail', '/recycle/restore', '/recycle/purge', '/diary/promote', '/backup', '/review/run']) {
@@ -95,6 +115,56 @@ test('permanent delete requires exact target phrase and current recycle state, r
   assert.deepEqual(results.map((r) => r.body.deleted).sort(), [0, 1]);
   assert.equal(s.service.status().events.recycle, 0);
   assert.equal((await s.service.recordEvent(eventInput())).purged, true);
+});
+
+test('public manual purge validates pure data before reading IDs or comparing confirmation', async (t) => {
+  const s = await setup(t); const event = await s.service.recordEvent(eventInput());
+  await s.service.repository.moveToRecycle({ kind: 'event', id: event.id });
+  let touched = 0;
+  const getter = () => { touched++; return event.id; };
+  const idObject = { [Symbol.toPrimitive]() { touched++; return event.id; }, toString() { touched++; return event.id; } };
+  const accessor = { kind: 'event', get id() { return getter(); } };
+  const inherited = Object.assign(Object.create(Object.defineProperty({}, 'id', { get: getter })), { kind: 'event' });
+  const array = []; Object.defineProperty(array, 'id', { get: getter });
+  const kindAccessor = { id: event.id, get kind() { touched++; return 'event'; } };
+  const versionAccessor = { id: event.id, kind: 'event', get version() { touched++; return 2; } };
+  for (const input of [accessor, inherited, array, kindAccessor, versionAccessor, { kind: 'event', id: idObject },
+    Object.assign(new Date(), { kind: 'event', id: event.id }), { kind: 'event', id: event.id, extra: true }]) {
+    await assert.rejects(s.service.purgeRecycleItem(input, `永久删除 ${event.id}`), { code: 'MEMORY_INVALID_INPUT' });
+    assert.equal(touched, 0);
+  }
+  assert.equal(s.service.status().events.recycle, 1);
+});
+
+test('manual purge hands the exact validated snapshot to the manager despite later caller mutation', async (t) => {
+  const s = await setup(t); const first = await s.service.recordEvent(eventInput());
+  const second = await s.service.recordEvent(eventInput({ sourceKey: 'second-purge-target' }));
+  for (const event of [first, second]) await s.service.repository.moveToRecycle({ kind: 'event', id: event.id });
+  const input = { kind: 'event', id: first.id, version: 2 };
+  const run = s.service.purgeManager.runManual.bind(s.service.purgeManager);
+  s.service.purgeManager.runManual = (snapshot) => {
+    assert.notEqual(snapshot, input);
+    input.id = second.id;
+    assert.equal(snapshot.id, first.id);
+    return run(snapshot);
+  };
+  assert.deepEqual(await s.service.purgeRecycleItem(input, `永久删除 ${first.id}`), { deleted: 1 });
+  assert.equal(s.service.database.read((db) => db.prepare('SELECT id FROM memory_events').get().id), second.id);
+});
+
+test('manual purge route rejects malformed DTOs before invoking the service', async (t) => {
+  const s = await setup(t); let calls = 0;
+  s.service.purgeRecycleItem = async () => { calls++; return { deleted: 0 }; };
+  for (const input of [{ kind: 'event', id: ['x'], confirmation: '永久删除 x' },
+    { kind: 'event', id: { toString: 'x' }, confirmation: '永久删除 x' },
+    { kind: ['event'], id: 'x', confirmation: '永久删除 x' },
+    { kind: 'event', id: 'x', confirmation: ['永久删除 x'] },
+    { kind: 'event', id: 'x', version: {}, confirmation: '永久删除 x' }]) {
+    assert.deepEqual(await s.request('/recycle/purge', input), { status: 400, body: { code: 'MEMORY_INVALID_INPUT' } });
+  }
+  assert.deepEqual(await s.request('/recycle/purge', {}, 'POST', { raw: '{"kind":"event","id":"x","confirmation":"永久删除 x","__proto__":{"id":"other"}}' }),
+    { status: 400, body: { code: 'MEMORY_INVALID_INPUT' } });
+  assert.equal(calls, 0);
 });
 
 test('manual delete rechecks restored state after backup and backup failure preserves the target', async (t) => {
@@ -201,10 +271,9 @@ test('client is a lazy host React factory, registers once and releases slot and 
 });
 
 // Browser packages are test-only, supplied by the caller; the plugin never bundles React or Playwright.
-test('desktop and mobile ledger renders, wraps, expands bodies and enforces deletion confirmation', {
-  skip: !process.env.MANAGEMENT_VISUAL_RUNTIME || !process.env.MANAGEMENT_PLAYWRIGHT_PATH
-    ? 'Set MANAGEMENT_VISUAL_RUNTIME (React 18 UMD directory) and MANAGEMENT_PLAYWRIGHT_PATH to an existing Playwright entry' : false,
-}, async (t) => {
+const browserOptions = { skip: !process.env.MANAGEMENT_VISUAL_RUNTIME || !process.env.MANAGEMENT_PLAYWRIGHT_PATH
+  ? 'Set MANAGEMENT_VISUAL_RUNTIME (React 18 UMD directory) and MANAGEMENT_PLAYWRIGHT_PATH to an existing Playwright entry' : false };
+async function browserHarness(t) {
   const { chromium } = await import(pathToFileURL(process.env.MANAGEMENT_PLAYWRIGHT_PATH).href);
   const assets = {
     '/react.js': readFileSync(join(process.env.MANAGEMENT_VISUAL_RUNTIME, 'node_modules/react/umd/react.development.js')),
@@ -224,6 +293,58 @@ test('desktop and mobile ledger renders, wraps, expands bodies and enforces dele
   t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
   const browser = await chromium.launch({ channel: process.env.MANAGEMENT_BROWSER_CHANNEL || 'msedge', headless: true });
   t.after(() => browser.close());
+  return { browser, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+test('delayed initial status survives an early search and late initial search cannot replace the new list', browserOptions, async (t) => {
+  const { browser, url } = await browserHarness(t);
+  const page = await browser.newPage();
+  let releaseStatus; let releaseSearch;
+  const statusGate = new Promise((resolve) => { releaseStatus = resolve; });
+  const searchGate = new Promise((resolve) => { releaseSearch = resolve; });
+  try {
+    await page.addInitScript(() => {
+      const original = window.fetch;
+      window.fetch = async (path, options) => {
+        const response = await original(path, options);
+        const json = response.json.bind(response);
+        response.json = async () => {
+          const data = await json();
+          if (path.endsWith('/search') && JSON.parse(options.body).query === '') window.initialSearchParsed = true;
+          return data;
+        };
+        return response;
+      };
+    });
+    await page.route('**/dafeiyu-memory/api/**', async (route) => {
+      const path = new URL(route.request().url()).pathname.split('/api')[1];
+      let data;
+      if (path === '/status') { await statusGate; data = { code: 'ready', counts: { short: 42, long: 3, diary: 2, recycle: 1 } }; }
+      if (path === '/search') {
+        const query = route.request().postDataJSON().query;
+        if (query === '') await searchGate;
+        data = { items: [{ id: query === '' ? 'old-initial-row' : 'latest-query-row', kind: 'event', source: 'qq', state: 'active', time: NOW, version: 1 }], hasMore: false, offset: 0 };
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+    });
+    await page.goto(url);
+    await page.getByRole('textbox', { name: '搜索关键字' }).fill('新查询');
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await page.getByText('编号 latest-query-row · 身份已隐藏', { exact: true }).waitFor();
+    releaseStatus();
+    const rendered = await page.waitForFunction(() => document.querySelector('.memory-count strong')?.textContent === '42', undefined, { timeout: 1500 }).then(() => true, () => false);
+    assert.equal(rendered, true, 'status counts must render even when a search completed before the initial status response');
+    assert.equal(await page.locator('.memory-header').innerText(), '记忆台账\n正常');
+    releaseSearch();
+    await page.waitForFunction(() => window.initialSearchParsed === true);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.getByText('编号 latest-query-row · 身份已隐藏', { exact: true }).count(), 1);
+    assert.equal(await page.getByText('编号 old-initial-row · 身份已隐藏', { exact: true }).count(), 0);
+  } finally { releaseStatus(); releaseSearch(); await page.close(); }
+});
+
+test('desktop and mobile ledger renders, wraps, expands bodies and enforces deletion confirmation', browserOptions, async (t) => {
+  const { browser, url } = await browserHarness(t);
   const output = mkdtempSync(join(tmpdir(), 'dafeiyu-management-visual-'));
   t.diagnostic(`Visual screenshots: ${output}`);
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
@@ -246,7 +367,7 @@ test('desktop and mobile ledger renders, wraps, expands bodies and enforces dele
         if (path === '/recycle/purge') { purgeRequests++; assert.equal(route.request().postDataJSON().confirmation, `永久删除 ${id}`); recycle = false; data = { deleted: 1 }; }
         await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data ?? {}) });
       });
-      await page.goto(`http://127.0.0.1:${server.address().port}`);
+      await page.goto(url);
       await page.getByRole('button', { name: '展开正文', exact: true }).waitFor();
       assert.equal(detailRequests, 0);
       await page.getByRole('button', { name: '展开正文', exact: true }).click();

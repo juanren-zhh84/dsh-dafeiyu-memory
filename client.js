@@ -50,6 +50,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('');
       const lifecycle = React.useRef(null);
       const generation = React.useRef(0);
+      const statusGeneration = React.useRef(0);
 
       async function json(path, input, session) {
         const response = await fetch(API + path, { method: input === undefined ? 'GET' : 'POST', credentials: 'same-origin',
@@ -60,13 +61,24 @@ window.__ModuleLoader__.load({
         return data;
       }
 
+      async function loadStatus(session) {
+        const seq = ++statusGeneration.current;
+        try {
+          const value = await json('/status', undefined, session);
+          if (!session.signal.aborted && seq === statusGeneration.current) setStatus(value);
+        } catch (error) {
+          if (!session.signal.aborted && seq === statusGeneration.current) throw error;
+        }
+      }
+
       React.useEffect(() => {
         const controller = new AbortController();
         lifecycle.current = controller;
+        loadStatus(controller).catch(() => { if (!controller.signal.aborted) setNotice('MEMORY_REQUEST_FAILED'); });
         const seq = ++generation.current;
-        Promise.all([json('/status', undefined, controller), json('/search', { context: 'management', query: '', layer: 'all' }, controller)])
-          .then(([value, results]) => { if (!controller.signal.aborted && seq === generation.current) { setStatus(value); setList(results); } })
-          .catch(() => { if (!controller.signal.aborted) setNotice('MEMORY_REQUEST_FAILED'); });
+        json('/search', { context: 'management', query: '', layer: 'all' }, controller)
+          .then((results) => { if (!controller.signal.aborted && seq === generation.current) setList(results); })
+          .catch(() => { if (!controller.signal.aborted && seq === generation.current) setNotice('MEMORY_REQUEST_FAILED'); });
         return () => { controller.abort(); if (lifecycle.current === controller) lifecycle.current = null; };
       }, []);
 
@@ -87,8 +99,8 @@ window.__ModuleLoader__.load({
       });
       const refresh = (path, input, success) => perform(async (session, current) => {
         await json(path, input, session);
-        const [value, results] = await Promise.all([json('/status', undefined, session), json('/search', { context: 'management', query, layer }, session)]);
-        if (current()) { setStatus(value); setList(results); setDetails({}); setConfirm(null); setPhrase(''); setNotice(success); }
+        const [, results] = await Promise.all([loadStatus(session), json('/search', { context: 'management', query, layer }, session)]);
+        if (current()) { setList(results); setDetails({}); setConfirm(null); setPhrase(''); setNotice(success); }
       });
       const expand = (item) => {
         const key = `${item.kind}:${item.id}`;

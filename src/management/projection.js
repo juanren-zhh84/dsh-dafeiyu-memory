@@ -78,7 +78,7 @@ export function managementSearch(database, input) {
 
 export function managementDetail(database, input) {
   const data = validateFields(input, ['context', 'kind', 'id']);
-  if (data.context !== 'management' || !Object.hasOwn(tables, data.kind)) invalid();
+  if (data.context !== 'management' || typeof data.kind !== 'string' || !Object.hasOwn(tables, data.kind)) invalid();
   string(data.id);
   return database.read((db) => {
     const content = data.kind === 'event' ? 'content_text' : data.kind === 'item' ? 'content' : "title || char(10) || body";

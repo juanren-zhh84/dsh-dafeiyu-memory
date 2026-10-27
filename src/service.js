@@ -10,7 +10,7 @@ import { PurgeManager } from './maintenance/purge.js';
 import { CapacityManager } from './maintenance/capacity.js';
 import { EventSpool } from './maintenance/spool.js';
 import { ImportManager } from './importers/index.js';
-import { managementDetail, managementSearch } from './management/projection.js';
+import { managementDetail, managementSearch, target } from './management/projection.js';
 
 export class DafeiyuMemoryService extends Service {
   constructor(ctx, { config, paths, database, repository, clock, idGenerator, reviewModel, timer, maintenance = {} }) {
@@ -67,8 +67,9 @@ export class DafeiyuMemoryService extends Service {
   async purgeRecycleItem(input, confirmation) {
     assertReady(this);
     if (confirmation !== undefined) {
-      if (confirmation !== `永久删除 ${input?.id}`) throw memoryError('MEMORY_INVALID_INPUT', 'Invalid memory input');
-      return this.purgeManager.runManual(input);
+      const selected = target(input);
+      if (confirmation !== `永久删除 ${selected.id}`) throw memoryError('MEMORY_INVALID_INPUT', 'Invalid memory input');
+      return this.purgeManager.runManual(selected);
     }
     return this.purgeManager.run(input);
   }
