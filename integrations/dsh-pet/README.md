@@ -10,9 +10,9 @@ pwsh -NoProfile -File ./scripts/prepare-pet-source.ps1
 pwsh -NoProfile -File ./scripts/prepare-pet-source.ps1 -DshHome 'D:\dsh-test' -Target 'D:\dsh-test\sources\dsh-pet-unified-memory'
 ```
 
-默认目标是 `$DSH_HOME/sources/dsh-pet-unified-memory`。未设置 `DSH_HOME` 时使用 `$env:USERPROFILE/.dsh`。`-Remote`、`-Tag` 和 `-Target` 支持使用本地临时仓库验证；包名和版本检查始终生效。
+默认目标是 `$DSH_HOME/sources/dsh-pet-unified-memory`。未设置 `DSH_HOME` 时使用 `$env:USERPROFILE/.dsh`。`-Remote`、`-Tag` 和 `-Target` 支持使用本地临时仓库验证；包名和版本检查始终生效。真实 `v0.3.8` 仓库的包根是 `<target>/dsh-pet`；脚本同时支持包位于仓库根的测试布局，补丁路径始终相对于解析出的包根。
 
-脚本在修改前检查规范化目录、路径祖先无链接、包名/版本、HEAD 对应指定 tag、origin 和工作树。首次只接受不存在的目标或干净的匹配仓库；随后执行 `git apply --check`、应用补丁、`npm install --ignore-scripts --no-audit --no-fund --package-lock=false`、`npm test`、`npm run build`。不自动执行依赖安装钩子。命令失败即停止，不回滚或覆盖用户文件。脚本不修改 desktop profile，也不修改已安装的 `node_modules`；构建成功后通过桌面应用的本地源界面选择源码目录。
+脚本在修改前检查规范化目录、路径祖先无链接、包名/版本、HEAD 对应指定 tag、origin 和工作树。首次只接受不存在的目标或干净的匹配仓库；随后执行 `git apply --check` 和应用补丁（子目录布局使用 `--directory=dsh-pet`）。检测到上游 pnpm 锁文件时，在其 workspace 根运行 `corepack pnpm install --frozen-lockfile`，再运行 `corepack pnpm --dir <packageRoot> test` 和 `build`。真实 tag 的锁文件及 workspace 配置均位于 `<target>/dsh-pet`，其中的 rolldown override 必须保留。Corepack 自动写入 packageManager 的行为已关闭。仅无 pnpm 配置的测试布局回落到 `npm install --ignore-scripts --no-audit --no-fund --package-lock=false`、`npm test`、`npm run build`。命令失败即停止，不回滚或覆盖用户文件。脚本不修改 desktop profile，也不修改已安装的 `node_modules`；构建成功后通过桌面应用的本地源界面选择解析出的 **packageRoot**，当前为 `<target>/dsh-pet`。
 
 应用状态存在源码仓库的 `.git/dafeiyu-unified-memory.json` 中，包含基线 commit、补丁 hash 和三个补丁文件的 hash。重复执行只接受同一补丁、同一基线和完整的已知工作树状态；未知文件、暂存修改或补丁文件变化都会停止。安装/测试/构建失败后，状态仍可用于检查并重试。
 

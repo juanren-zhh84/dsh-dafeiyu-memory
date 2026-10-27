@@ -11,12 +11,13 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const patchPath = resolve(root, 'integrations/dsh-pet/patches/0.3.8-unified-memory.patch');
 const run = (command, args, cwd) => execFileSync(command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
-function fixture(t) {
+function fixture(t, nested = false) {
   const dir = mkdtempSync(join(tmpdir(), 'pet-patch-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  mkdirSync(join(dir, 'src/host'), { recursive: true });
-  writeFileSync(join(dir, 'package.json'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-package.json')));
-  writeFileSync(join(dir, 'src/host/index.ts'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-chat-0.3.8.ts')));
+  const packageRoot = nested ? join(dir, 'dsh-pet') : dir;
+  mkdirSync(join(packageRoot, 'src/host'), { recursive: true });
+  writeFileSync(join(packageRoot, 'package.json'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-package.json')));
+  writeFileSync(join(packageRoot, 'src/host/index.ts'), readFileSync(resolve(root, 'test/fixtures/pet/upstream-chat-0.3.8.ts')));
   run('git', ['init', '-q'], dir);
   run('git', ['config', 'core.autocrlf', 'false'], dir);
   run('git', ['add', '.'], dir);
@@ -31,6 +32,43 @@ test('0.3.8 version-locked pet patch and preparation script exist', () => {
   }
   const script = readFileSync(new URL('../scripts/prepare-pet-source.ps1', import.meta.url), 'utf8');
   assert.match(script, /0\.3\.8/);
+});
+
+test('preparation supports the real tag layout with package inside dsh-pet/', t => {
+  const remote = fixture(t, true);
+  for (const name of ['pnpm-lock.yaml', 'pnpm-workspace.yaml']) writeFileSync(join(remote, 'dsh-pet', name), '# fixture');
+  run('git', ['add', '.'], remote);
+  run('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'pnpm workspace'], remote);
+  run('git', ['tag', '-f', 'v0.3.8'], remote);
+  const home = mkdtempSync(join(tmpdir(), 'pet-nested-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const target = join(home, 'sources/upstream');
+  const bin = join(home, 'bin'), trace = join(home, 'commands.jsonl');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'corepack.ps1'), `param([Parameter(ValueFromRemainingArguments=$true)][string[]] $Rest)
+@{ cwd = (Get-Location).Path; args = @($Rest) } | ConvertTo-Json -Compress | Add-Content -LiteralPath $env:PET_COMMAND_TRACE
+exit 0
+`);
+  const env = { ...process.env, PET_COMMAND_TRACE: trace, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path');
+  env[pathKey] = `${bin};${env[pathKey]}`;
+  const invoke = () => spawnSync('pwsh', ['-NoProfile', '-File', resolve(root, 'scripts/prepare-pet-source.ps1'),
+    '-DshHome', home, '-Remote', remote, '-Target', target],
+  { encoding: 'utf8', timeout: 120000, env });
+  const result = invoke();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.ok(existsSync(join(target, 'dsh-pet/src/host/unified-memory.ts')));
+  assert.equal(existsSync(join(target, 'src')), false);
+  assert.ok(existsSync(trace), 'pnpm workspace must use corepack, not npm');
+  const commands = readFileSync(trace, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
+  const packageRoot = join(target, 'dsh-pet');
+  assert.deepEqual(commands, [
+    { cwd: packageRoot, args: ['pnpm', 'install', '--frozen-lockfile'] },
+    { cwd: packageRoot, args: ['pnpm', '--dir', packageRoot, 'test'] },
+    { cwd: packageRoot, args: ['pnpm', '--dir', packageRoot, 'build'] },
+  ]);
+  const repeated = invoke();
+  assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
 });
 
 test('patch changes only host hook, canonical bridge and upstream tests; bridge matches normalized text', t => {

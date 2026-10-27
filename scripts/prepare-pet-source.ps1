@@ -43,8 +43,14 @@ function Git-Output([string[]] $Arguments) {
 }
 
 function Assert-Identity {
-    Assert-NoLinks (Join-Path $script:destination 'package.json')
-    try { $package = Get-Content -LiteralPath (Join-Path $script:destination 'package.json') -Raw | ConvertFrom-Json }
+    $script:packageRelative = ''
+    $script:packageRoot = $script:destination
+    if (-not (Test-Path -LiteralPath (Join-Path $script:packageRoot 'package.json'))) {
+        $script:packageRelative = 'dsh-pet'
+        $script:packageRoot = Full-Path (Join-Path $script:destination $script:packageRelative)
+    }
+    Assert-NoLinks (Join-Path $script:packageRoot 'package.json')
+    try { $package = Get-Content -LiteralPath (Join-Path $script:packageRoot 'package.json') -Raw | ConvertFrom-Json }
     catch { throw 'PET_SOURCE_VERSION_MISMATCH' }
     if ($package.name -cne 'dsh-pet' -or $package.version -cne '0.3.8') { throw 'PET_SOURCE_VERSION_MISMATCH' }
     Assert-NoLinks (Join-Path $script:destination '.git')
@@ -56,14 +62,21 @@ function Assert-Identity {
     return $headCommit
 }
 
+function Apply-Output([string[]] $Arguments) {
+    $options = @('apply')
+    if ($script:packageRelative) { $options += "--directory=$script:packageRelative" }
+    Git-Output ($options + $Arguments + @($script:patch))
+}
+
 function Assert-Prepared($State) {
-    if ($State.patchHash -ne $script:patchHash -or $State.baseCommit -ne $script:baseCommit -or $State.tag -ne $Tag -or $State.remote -ne $Remote) {
+    if ($State.patchHash -ne $script:patchHash -or $State.baseCommit -ne $script:baseCommit -or $State.tag -ne $Tag -or $State.remote -ne $Remote -or $State.packageRelative -ne $script:packageRelative) {
         throw 'PET_SOURCE_STATE_MISMATCH'
     }
     & git -C $script:destination diff --cached --quiet
     if ($LASTEXITCODE -ne 0) { throw 'PET_SOURCE_DIRTY' }
     $actual = @(Git-Output @('status', '--porcelain', '--untracked-files=all'))
-    $expected = @(' M src/host/index.ts', '?? src/host/unified-memory.test.ts', '?? src/host/unified-memory.ts')
+    $prefix = if ($script:packageRelative) { "$script:packageRelative/" } else { '' }
+    $expected = @(" M ${prefix}src/host/index.ts", "?? ${prefix}src/host/unified-memory.test.ts", "?? ${prefix}src/host/unified-memory.ts")
     if (@(Compare-Object $actual $expected).Count) { throw 'PET_SOURCE_DIRTY' }
     foreach ($file in $State.files) {
         $path = Full-Path (Join-Path $script:destination $file.path)
@@ -73,7 +86,7 @@ function Assert-Prepared($State) {
             throw 'PET_SOURCE_DIRTY'
         }
     }
-    Git-Output @('apply', '--reverse', '--check', $script:patch) | Out-Null
+    Apply-Output @('--reverse', '--check') | Out-Null
 }
 
 if ([string]::IsNullOrWhiteSpace($DshHome)) {
@@ -102,21 +115,37 @@ if (Test-Path -LiteralPath $statePath) {
     Assert-Prepared $state
 } else {
     if (@(Git-Output @('status', '--porcelain', '--untracked-files=all')).Count) { throw 'PET_SOURCE_DIRTY' }
-    Git-Output @('apply', '--check', $script:patch) | Out-Null
-    Git-Output @('apply', $script:patch) | Out-Null
+    Apply-Output @('--check') | Out-Null
+    Apply-Output @() | Out-Null
+    $prefix = if ($script:packageRelative) { "$script:packageRelative/" } else { '' }
     $files = @('src/host/index.ts', 'src/host/unified-memory.ts', 'src/host/unified-memory.test.ts') | ForEach-Object {
-        @{ path = $_; hash = (Get-FileHash -LiteralPath (Join-Path $script:destination $_) -Algorithm SHA256).Hash }
+        @{ path = "$prefix$_"; hash = (Get-FileHash -LiteralPath (Join-Path $script:packageRoot $_) -Algorithm SHA256).Hash }
     }
-    $state = @{ patchHash = $script:patchHash; baseCommit = $script:baseCommit; tag = $Tag; remote = $Remote; files = @($files) }
+    $state = @{ patchHash = $script:patchHash; baseCommit = $script:baseCommit; tag = $Tag; remote = $Remote; packageRelative = $script:packageRelative; files = @($files) }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
 }
-Push-Location -LiteralPath $script:destination
+$workspaceRoot = $script:packageRoot
+if (Test-Path -LiteralPath (Join-Path $script:destination 'pnpm-lock.yaml')) { $workspaceRoot = $script:destination }
+$usePnpm = Test-Path -LiteralPath (Join-Path $workspaceRoot 'pnpm-lock.yaml')
+foreach ($name in @('pnpm-lock.yaml', 'pnpm-workspace.yaml')) { Assert-NoLinks (Join-Path $workspaceRoot $name) }
+if (-not $usePnpm -and (Test-Path -LiteralPath (Join-Path $workspaceRoot 'pnpm-workspace.yaml'))) {
+    throw 'PET_SOURCE_LOCKFILE_REQUIRED'
+}
+$previousAutoPin = $env:COREPACK_ENABLE_AUTO_PIN
+$env:COREPACK_ENABLE_AUTO_PIN = '0'
+Push-Location -LiteralPath $workspaceRoot
 try {
-    & npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+    if ($usePnpm) { & corepack pnpm install --frozen-lockfile }
+    else { & npm install --ignore-scripts --no-audit --no-fund --package-lock=false }
     if ($LASTEXITCODE -ne 0) { throw 'PET_SOURCE_INSTALL_FAILED' }
-    & npm test
+    if ($usePnpm) { & corepack pnpm --dir $script:packageRoot test }
+    else { & npm test }
     if ($LASTEXITCODE -ne 0) { throw 'PET_SOURCE_TEST_FAILED' }
-    & npm run build
+    if ($usePnpm) { & corepack pnpm --dir $script:packageRoot build }
+    else { & npm run build }
     if ($LASTEXITCODE -ne 0) { throw 'PET_SOURCE_BUILD_FAILED' }
-} finally { Pop-Location }
+} finally {
+    Pop-Location
+    $env:COREPACK_ENABLE_AUTO_PIN = $previousAutoPin
+}
 Write-Output 'PET_SOURCE_READY'
