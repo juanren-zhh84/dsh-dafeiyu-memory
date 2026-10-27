@@ -57,3 +57,19 @@ export function memoryError(code, message) {
   error.stack = `Error: ${message}`;
   return error;
 }
+/**
+ * importExisting({ dryRun = false, sources? } = {}) -> sanitized ImportReport.
+ * sources is an optional map of selected source paths: { aurabot?: absoluteDirectory,
+ * pet?: absoluteMemoryJson, douyin?: absoluteSqlite }. Omitting the map discovers
+ * sources below DSH_HOME plus the verified Douyin runtime-location/env settings.
+ * A supplied map imports only its named sources. Source paths never appear in reports.
+ * Report: { ok, dryRun, startedAt, finishedAt, sources: [{ source, status,
+ * imported, skipped, failed, planned, code, privateContextCode? }], scanCode?, reportCode? }.
+ * Source statuses: skipped/planned/imported/failed/optional-unsupported/optional-failed.
+ * Imported counts committed targets, skipped counts ledger/target/purge duplicates;
+ * failed counts known records in a failed transaction or one unparseable batch.
+ * planned counts new targets (including committed targets on actual runs).
+ * dryRun writes neither snapshots, target data, ledger, reports nor source files.
+ * Global notes and diary default to owner-private. Unsupported Douyin private
+ * context stays excluded rather than inventing a source timestamp.
+ */

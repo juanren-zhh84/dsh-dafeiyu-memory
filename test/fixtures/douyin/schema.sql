@@ -1,0 +1,1 @@
+CREATE TABLE memory_entries(id INTEGER PRIMARY KEY,kind TEXT,content TEXT,source TEXT,sources_json TEXT,video_id TEXT,url TEXT,author TEXT,title TEXT,metadata_json TEXT,created_at INTEGER,updated_at INTEGER,origin TEXT,status TEXT,external_key TEXT);

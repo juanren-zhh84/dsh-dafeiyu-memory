@@ -9,6 +9,7 @@ import { BackupManager } from './maintenance/backup.js';
 import { PurgeManager } from './maintenance/purge.js';
 import { CapacityManager } from './maintenance/capacity.js';
 import { EventSpool } from './maintenance/spool.js';
+import { ImportManager } from './importers/index.js';
 
 export class DafeiyuMemoryService extends Service {
   constructor(ctx, { config, paths, database, repository, clock, idGenerator, reviewModel, timer, maintenance = {} }) {
@@ -27,6 +28,8 @@ export class DafeiyuMemoryService extends Service {
       io: maintenance.capacityIo });
     this.spool = new EventSpool({ paths, config, writeQueue: this.writeQueue, recordEvent: (input) => this.recordEvent(input),
       io: maintenance.io, canGrow: () => this.capacityManager.status().state !== 'degraded' });
+    this.importManager = new ImportManager({ database, paths, config, clock, scan: () => this.reviewLifecycle.scan(),
+      canGrow: () => this.capacityManager.status().state !== 'degraded' });
     this.state = 'ready';
     this.scheduler = new ReviewScheduler({ lifecycle: {
       runDueReviews: async () => {
@@ -55,7 +58,7 @@ export class DafeiyuMemoryService extends Service {
 
   async recordEvent(input) { assertReady(this); return this.repository.insertEvent(input); }
   async search() { return unavailable(this, 'search'); }
-  async importExisting() { return unavailable(this, 'importExisting'); }
+  async importExisting(options) { assertReady(this); return this.importManager.importExisting(options); }
   async runDueReviews() { assertReady(this); return this.reviewLifecycle.runDueReviews(); }
   async backup() { assertReady(this); return this.backupManager.create(); }
   async restoreRecycleItem(input) { assertReady(this); return this.repository.restoreRecycle(input); }
@@ -68,6 +71,7 @@ export class DafeiyuMemoryService extends Service {
   async dispose() {
     this.state = 'disposed';
     await this.scheduler.dispose();
+    await this.importManager.settle();
     await this.spool.settle();
     await this.database.close();
   }

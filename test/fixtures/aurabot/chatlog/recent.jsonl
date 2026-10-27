@@ -1,0 +1,2 @@
+{"t": 1792972800000, "chatId": "group:test", "who": "fixture", "uid": "sender", "text": "recent fixture"}
+{"t": 1792281600000, "chatId": "private:fixture", "who": "bot", "text": "old fixture"}

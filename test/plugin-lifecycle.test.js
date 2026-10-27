@@ -53,7 +53,7 @@ test('unimplemented asynchronous operations fail explicitly instead of reporting
   await apply(ctx, {}, { dshHome: createTempHome() });
   const service = ctx.get('dafeiyuMemory');
   for (const name of [
-    'search', 'importExisting',
+    'search',
   ]) {
     const operation = service[name]({});
     assert.ok(operation instanceof Promise, `${name} returns a Promise`);
