@@ -86,6 +86,19 @@ export class MemoryDatabase {
     const assertActive = () => {
       if (!active) throw memoryError('MEMORY_TRANSACTION_FINISHED', 'Memory transaction scope has finished');
     };
+    const activeIterators = new Set();
+    const closeIterator = (iterator, ...values) => {
+      const result = iterator.return(...values);
+      activeIterators.delete(iterator);
+      return result;
+    };
+    const closeIterators = () => {
+      let failed = false;
+      for (const iterator of activeIterators) {
+        try { closeIterator(iterator); } catch { failed = true; }
+      }
+      if (failed) throw memoryError('MEMORY_ITERATOR_CLEANUP_FAILED', 'Memory transaction iterator cleanup failed');
+    };
     const scopedStatements = new Map();
     const connection = Object.freeze({
       exec: (sql) => { assertActive(); return this.#connection.exec(sql); },
@@ -101,13 +114,19 @@ export class MemoryDatabase {
                   assertActive();
                   const result = value.apply(target, args);
                   if (property !== 'iterate') return result;
+                  activeIterators.add(result);
                   // The native iterator executes lazily, so every resume needs the same guard.
                   return Object.freeze({
-                    next: (...values) => { assertActive(); return result.next(...values); },
-                    return: (...values) => { assertActive(); return result.return(...values); },
+                    next: (...values) => {
+                      assertActive();
+                      const step = result.next(...values);
+                      if (step.done) activeIterators.delete(result);
+                      return step;
+                    },
+                    return: (...values) => { assertActive(); return closeIterator(result, ...values); },
                     throw: (error) => {
                       assertActive();
-                      result.return();
+                      closeIterator(result);
                       throw error;
                     },
                     [Symbol.iterator]() { assertActive(); return this; },
@@ -127,9 +146,11 @@ export class MemoryDatabase {
         if (result instanceof Promise) result.catch(() => {});
         throw memoryError('MEMORY_ASYNC_TRANSACTION', 'Memory transactions must return synchronously');
       }
+      closeIterators();
       this.#database.exec('COMMIT');
       return result;
     } catch (error) {
+      try { closeIterators(); } catch (cleanupError) { error = cleanupError; }
       this.#database.exec('ROLLBACK');
       throw error;
     } finally {

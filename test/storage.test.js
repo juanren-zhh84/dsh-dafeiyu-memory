@@ -183,6 +183,85 @@ test('transaction iterators support normal iteration and early return within the
   assert.throws(() => iterator.next(), { code: 'MEMORY_TRANSACTION_FINISHED' });
 });
 
+test('partially consumed SELECT iterators are closed before commit and release checkpoint locks', async (t) => {
+  const { database } = await openDatabase(t);
+  let iterator;
+  database.transaction((db) => {
+    iterator = db.prepare("SELECT value FROM json_each('[1,2,3]')").iterate();
+    assert.equal(iterator.next().value.value, 1);
+  });
+  for (const operation of [() => iterator.next(), () => iterator.return(), () => iterator.throw(new Error('stop')), () => iterator[Symbol.iterator]()]) {
+    assert.throws(operation, { code: 'MEMORY_TRANSACTION_FINISHED' });
+  }
+  assert.equal(database.checkpoint().busy, 0);
+  await database.close();
+});
+
+test('partially consumed INSERT RETURNING commits the entire executed statement without locks', async (t) => {
+  const { database } = await openDatabase(t);
+  database.transaction((db) => db.exec('CREATE TABLE partial_insert_probe (id INTEGER PRIMARY KEY) STRICT'));
+  let iterator;
+  database.transaction((db) => {
+    iterator = db.prepare('INSERT INTO partial_insert_probe VALUES (1), (2) RETURNING id').iterate();
+    assert.equal(iterator.next().value.id, 1);
+  });
+  assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM partial_insert_probe').get().count), 2);
+  for (const operation of [() => iterator.next(), () => iterator.return(), () => iterator.throw(new Error('stop'))]) {
+    assert.throws(operation, { code: 'MEMORY_TRANSACTION_FINISHED' });
+  }
+  assert.equal(database.checkpoint().busy, 0);
+  await database.close();
+});
+
+test('partially consumed INSERT RETURNING is closed before rollback with no rows or locks left', async (t) => {
+  const { database } = await openDatabase(t);
+  database.transaction((db) => db.exec('CREATE TABLE partial_rollback_probe (id INTEGER PRIMARY KEY) STRICT'));
+  let iterator;
+  const failure = new Error('abort partial write');
+  assert.throws(() => database.transaction((db) => {
+    iterator = db.prepare('INSERT INTO partial_rollback_probe VALUES (1), (2) RETURNING id').iterate();
+    assert.equal(iterator.next().value.id, 1);
+    throw failure;
+  }), (error) => error === failure);
+  assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM partial_rollback_probe').get().count), 0);
+  for (const operation of [() => iterator.next(), () => iterator.return(), () => iterator.throw(new Error('stop'))]) {
+    assert.throws(operation, { code: 'MEMORY_TRANSACTION_FINISHED' });
+  }
+  assert.equal(database.checkpoint().busy, 0);
+  await database.close();
+});
+
+test('automatic iterator cleanup failure rolls back instead of committing and throws a stable error', async (t) => {
+  const { database } = await openDatabase(t);
+  database.transaction((db) => db.exec('CREATE TABLE cleanup_failure_probe (id INTEGER PRIMARY KEY) STRICT'));
+  const raw = new DatabaseSync(':memory:');
+  const statement = raw.prepare('SELECT 1');
+  const iterator = statement.iterate();
+  const prototype = Object.getPrototypeOf(iterator);
+  const nativeReturn = prototype.return;
+  iterator.return();
+  statement.close();
+  raw.close();
+  // Inject the otherwise exceptional native reset failure after releasing its resources.
+  t.mock.method(prototype, 'return', function (...args) {
+    nativeReturn.apply(this, args);
+    throw new Error('native iterator cleanup failed');
+  });
+  try {
+    assert.throws(() => database.transaction((db) => {
+      const pending = db.prepare('INSERT INTO cleanup_failure_probe VALUES (1), (2) RETURNING id').iterate();
+      pending.next();
+      // Failure on the first iterator must not skip releasing the other active statement.
+      const pendingRead = db.prepare("SELECT value FROM json_each('[1,2,3]')").iterate();
+      pendingRead.next();
+    }), { code: 'MEMORY_ITERATOR_CLEANUP_FAILED', message: 'Memory transaction iterator cleanup failed' });
+  } finally { t.mock.restoreAll(); }
+  assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM cleanup_failure_probe').get().count), 0);
+  assert.equal(database.transaction(() => 'usable'), 'usable');
+  assert.equal(database.checkpoint().busy, 0);
+  await database.close();
+});
+
 test('database open redacts native directory initialization errors', async () => {
   const home = createTempHome();
   const blockedDirectory = join(home, 'blocked');
