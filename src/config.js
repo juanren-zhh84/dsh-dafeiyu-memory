@@ -52,7 +52,7 @@ export function resolveConfig(overrides = {}) {
   if (config.backupLimitBytes < 32 * 1024 ** 2) invalid('backupLimitBytes');
   if (config.spoolLimitBytes < 1024 ** 2) invalid('spoolLimitBytes');
   if (config.purgeBatchSize > 100) invalid('purgeBatchSize');
-  if (!Number.isFinite(config.incrementalVacuumFreeRatio) || config.incrementalVacuumFreeRatio <= 0
+  if (!Number.isFinite(config.incrementalVacuumFreeRatio) || config.incrementalVacuumFreeRatio < 0.2
     || config.incrementalVacuumFreeRatio > 1) invalid('incrementalVacuumFreeRatio');
   for (const name of ['shortTerm', 'longTerm', 'diary']) {
     if (!Number.isSafeInteger(config.recallQuotas[name]) || config.recallQuotas[name] <= 0) {

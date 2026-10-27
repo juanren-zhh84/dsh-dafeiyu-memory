@@ -38,6 +38,13 @@ test('configuration accepts the 256 MiB capacity safety boundary', () => {
   assert.deepEqual(resolveConfig({ recallQuotas: { diary: 2 } }).recallQuotas, { shortTerm: 8, longTerm: 6, diary: 2 });
 });
 
+test('incremental vacuum configuration accepts only the agreed interval from 0.2 to 1', () => {
+  for (const value of [0.2, 0.5, 1]) assert.equal(resolveConfig({ incrementalVacuumFreeRatio: value }).incrementalVacuumFreeRatio, value);
+  for (const value of [0.19999999999999998, 0.1, 0, -1, 1.0000000000000002, NaN, Infinity, '0.2']) {
+    assert.throws(() => resolveConfig({ incrementalVacuumFreeRatio: value }), { code: 'MEMORY_INVALID_CONFIG' });
+  }
+});
+
 for (const [name, minimum] of [
   ['shortTermDays', 7],
   ['longTermDays', 30],

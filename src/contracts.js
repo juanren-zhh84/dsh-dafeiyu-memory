@@ -19,6 +19,8 @@ export const MEMORY_INPUT_LIMITS = Object.freeze({
  *
  * Repository writes return Promises; reads return synchronous camelCase DTOs.
  * insertEvent(input) -> event DTO (including id, version, externalKey).
+ * Redelivery of a physically purged event returns
+ * { inserted: false, deduplicated: true, purged: true, id: null } without a body.
  * promoteEvents({ jobId, candidates: [{ id, version }], retain, diary, discard })
  *   -> { items: item DTO[], diary: diary DTO[] }.
  * retain: [{ sourceIds, kind, subjectKey, subjectName, content, importance,

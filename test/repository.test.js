@@ -51,6 +51,17 @@ test('repeated source keys return the original event without inserting another r
   assert.equal(first.version, 1);
 });
 
+test('event insertion checks purge ledger inside its queued transaction before generating an ID or writing a body', async (t) => {
+  const { database, repository, rows } = await setup(t, { idGenerator: () => { throw new Error('must not create a purged event'); } });
+  const sourceHash = createHash('sha256').update(`event\0${JSON.stringify(['qq', 'message-1'])}`).digest('hex');
+  const ledgerWrite = database.write((db) => db.prepare('INSERT INTO purge_ledger VALUES (?, ?, ?)').run(sourceHash, 'event', NOW));
+  const result = repository.insertEvent(eventInput());
+  await ledgerWrite;
+  assert.deepEqual(await result, { inserted: false, deduplicated: true, purged: true, id: null });
+  assert.equal(rows('memory_events').length, 0);
+  assert.equal(rows('purge_ledger').length, 1);
+});
+
 test('missing source keys use a deterministic normalized SHA-256 content fingerprint', async (t) => {
   const { repository, rows } = await setup(t);
   const first = await repository.insertEvent(eventInput({ sourceKey: undefined, contentText: ' Ａ\n  fishing ' }));

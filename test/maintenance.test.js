@@ -519,3 +519,40 @@ test('a failed purge backup still permits expired ordinary backup cleanup and ch
   assert.equal(rows('memory_events').length, 1); assert.equal(rows('purge_ledger').length, 0);
   assert.equal(existsSync(join(service.paths.backups, `${old.id}.sqlite`)), false);
 });
+
+for (const sourceKey of ['original-message', undefined]) {
+  test(`spool and direct redelivery cannot revive a purged event with ${sourceKey === undefined ? 'derived' : 'explicit'} source key`, async (t) => {
+    const { service, time, rows } = await setup(t);
+    const input = eventInput({ sourceKey });
+    await service.enqueueSpool(input);
+    const event = await service.recordEvent(input);
+    await service.repository.moveToRecycle({ kind: 'event', id: event.id });
+    time.value += 7 * DAY;
+    assert.equal((await service.purgeRecycleItem()).deleted, 1);
+    const ledger = rows('purge_ledger').map((row) => ({ ...row }));
+    assert.equal(ledger[0].source_hash, createHash('sha256').update(`event\0${event.externalKey}`).digest('hex'));
+    assert.deepEqual(await service.drainSpool(), { recorded: 1, retained: 0, invalid: 0 });
+    assert.equal(rows('memory_events').length, 0);
+    assert.equal(readFileSync(join(service.paths.spool, 'events.jsonl'), 'utf8'), '');
+    for (let retry = 0; retry < 2; retry++) {
+      assert.deepEqual(await service.recordEvent(input), { inserted: false, deduplicated: true, purged: true, id: null });
+    }
+    assert.equal(rows('memory_events').length, 0);
+    assert.deepEqual(rows('purge_ledger').map((row) => ({ ...row })), ledger);
+  });
+}
+
+test('incremental vacuum requires a valid threshold of at least 0.2 and enough actual free pages', async () => {
+  const { PurgeManager } = await import('../src/maintenance/purge.js');
+  for (const [threshold, free, expected] of [[0.2, 19, 0], [0.2, 20, 1], [0.6, 59, 0], [0.6, 60, 1],
+    [1, 99, 0], [1, 100, 1], [0.19999999999999998, 20, 0], [1.1, 120, 0], [NaN, 100, 0], [Infinity, 100, 0]]) {
+    const executed = [];
+    const database = { checkpoint() {}, read: (callback) => callback({
+      prepare: (sql) => ({ get: () => sql === 'PRAGMA freelist_count' ? { freelist_count: free } : { page_count: 100 } }),
+      exec: (sql) => executed.push(sql),
+    }) };
+    new PurgeManager({ database, config: { incrementalVacuumFreeRatio: threshold } }).reclaimUnlocked();
+    assert.equal(executed.length, expected, `threshold=${threshold}; free=${free}`);
+    if (expected) assert.deepEqual(executed, ['PRAGMA incremental_vacuum']);
+  }
+});

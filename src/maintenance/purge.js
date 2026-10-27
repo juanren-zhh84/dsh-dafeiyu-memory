@@ -65,7 +65,10 @@ export class PurgeManager {
     this.database.read((db) => {
       const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
       const pages = db.prepare('PRAGMA page_count').get().page_count;
-      if (pages > 0 && free / pages >= this.config.incrementalVacuumFreeRatio) db.exec('PRAGMA incremental_vacuum');
+      const threshold = this.config.incrementalVacuumFreeRatio;
+      if (Number.isFinite(threshold) && threshold >= 0.2 && threshold <= 1 && pages > 0 && free / pages >= threshold) {
+        db.exec('PRAGMA incremental_vacuum');
+      }
     });
   }
 }

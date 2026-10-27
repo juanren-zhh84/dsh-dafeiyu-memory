@@ -193,6 +193,10 @@ export class MemoryRepository {
     return this.#mutate(() => {
       const event = normalizeEvent(input, this.config);
       return (db) => {
+        const sourceHash = hash(`event\0${event.externalKey}`);
+        if (db.prepare("SELECT 1 FROM purge_ledger WHERE source_hash = ? AND object_kind = 'event'").get(sourceHash)) {
+          return { inserted: false, deduplicated: true, purged: true, id: null };
+        }
         const existing = db.prepare('SELECT * FROM memory_events WHERE external_key = ?').get(event.externalKey);
         if (existing) return dto(existing);
         const id = text(this.idGenerator(), LIMIT.key);
