@@ -106,13 +106,17 @@ async function consume(stream, signal) {
 export class ReviewModel {
   constructor(ctx, { config = DEFAULT_CONFIG } = {}) { this.ctx = ctx; this.config = config; }
 
-  async review(input) {
+  async review(input, { signal } = {}) {
     const request = snapshotReviewRequest(input);
     let options;
     try {
       options = { ...selectionSnapshot(this.ctx.agentDefaultModel.currentSelection()),
-        system: prompt(request.mode), messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(request) }] }],
-        temperature: 0, maxTokens: 4096, signal: AbortSignal.timeout(this.config.reviewTimeoutMs) };
+        system: prompt(request.mode), messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify({
+          mode: request.mode, candidates: request.candidates.map(({ id, content }) => ({ id, content })),
+        }) }] }],
+        temperature: 0, maxTokens: 4096, signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(this.config.reviewTimeoutMs)])
+          : AbortSignal.timeout(this.config.reviewTimeoutMs) };
     } catch { throw reviewError('MEMORY_REVIEW_MODEL_FAILED'); }
     let stream;
     try { stream = this.ctx.llm.stream(options); }

@@ -9,6 +9,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   recallQuotas: Object.freeze({ shortTerm: 8, longTerm: 6, diary: 3 }),
   reviewBatchSize: 40,
   reviewTimeoutMs: 120_000,
+  reviewScanIntervalMs: 600_000,
+  reviewLeaseMs: 300_000,
   reviewMaxAttempts: 8,
   // Reviews use exponential retry delays capped at retryMaxMs.
   retryBaseMs: 15 * 60_000,
@@ -30,7 +32,7 @@ export function resolveConfig(overrides = {}) {
   };
   for (const name of [
     'shortTermDays', 'longTermDays', 'recycleDays', 'diskSoftLimitBytes',
-    'reviewBatchSize', 'reviewTimeoutMs', 'reviewMaxAttempts',
+    'reviewBatchSize', 'reviewTimeoutMs', 'reviewMaxAttempts', 'reviewScanIntervalMs', 'reviewLeaseMs',
     'retryBaseMs', 'retryMaxMs',
   ]) {
     if (!Number.isSafeInteger(config[name]) || config[name] <= 0) invalid(name);

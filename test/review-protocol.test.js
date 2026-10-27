@@ -116,7 +116,7 @@ test('reads the current selection on every call and copies only permitted settin
   assert.ok(fake.requests[0].signal instanceof AbortSignal); assert.equal(fake.requests[0].tools, undefined);
   assert.match(fake.requests[0].system, /JSON/);
   assert.equal(fake.requests[0].messages[0].role, 'user');
-  assert.deepEqual(JSON.parse(fake.requests[0].messages[0].content[0].text).candidates, candidates());
+  assert.deepEqual(JSON.parse(fake.requests[0].messages[0].content[0].text).candidates, candidates().map(({ id, content }) => ({ id, content })));
 });
 
 test('accepts reasoning blocks then exactly one text block using delta and complete block streams', async () => {
@@ -146,6 +146,20 @@ test('timeouts reject even if a provider ignores the abort signal', async () => 
   finally { clearTimeout(keepAlive); }
 });
 
+test('external cancellation aborts provider requests even when its iterator hangs', async () => {
+  const controller = new AbortController();
+  const fake = createFakeLlm(async function* () { await new Promise(() => {}); });
+  const keepAlive = setTimeout(() => {}, 1000);
+  const operation = new ReviewModel(fake.ctx, { config: { ...DEFAULT_CONFIG, reviewTimeoutMs: 50 } })
+    .review({ mode: 'short-term', candidates: candidates() }, { signal: controller.signal });
+  operation.catch(() => {});
+  controller.abort(new Error('account-secret'));
+  try {
+    assert.equal(fake.requests[0].signal.aborted, true);
+    await assert.rejects(operation, (e) => safeError(e, 'MEMORY_REVIEW_TIMEOUT'));
+  } finally { await operation.catch(() => {}); clearTimeout(keepAlive); }
+});
+
 test('provider exceptions and selection exceptions never leak their cause', async () => {
   await assert.rejects(review(() => { throw new Error('secret account C:\\private'); }), (e) => safeError(e, 'MEMORY_REVIEW_MODEL_FAILED'));
   const fake = createFakeLlm([]); fake.ctx.agentDefaultModel.currentSelection = () => { throw new Error('secret'); };
@@ -161,7 +175,7 @@ test('plugin injects model services and chat remains usable after a review failu
     await assert.rejects(service.reviewModel.review({ mode: 'short-term', candidates: candidates() }));
     const saved = await service.recordEvent(eventInput()); assert.ok(saved.id);
     assert.equal(typeof service.recall({ audience: 'owner' }), 'string');
-    await assert.rejects(service.runDueReviews(), { code: 'MEMORY_NOT_IMPLEMENTED' });
+    assert.deepEqual(await service.runDueReviews(), { queued: 0, completed: 0, retried: 0, failed: 0 });
   } finally { await service.dispose(); }
 });
 

@@ -106,6 +106,18 @@ function retainedDecision(input) {
     confidence: unit(data.confidence === undefined ? 1 : data.confidence), supersedesId: supersedes(data.supersedesId) };
 }
 
+function reviewLease(input) {
+  if (input === undefined) return;
+  const lease = ownObject(input, ['attempts', 'leaseUntil']);
+  if (integer(lease.attempts) < 1) fail();
+  return { attempts: lease.attempts, leaseUntil: integer(lease.leaseUntil) };
+}
+
+function assertLease(job, lease, now) {
+  if (lease && (job.state !== 'leased' || job.attempts !== lease.attempts || job.lease_until !== lease.leaseUntil
+    || lease.leaseUntil <= now)) fail('MEMORY_CONFLICT');
+}
+
 function assertTarget(db, table, id) {
   if (id !== null && !db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id)) fail('MEMORY_REFERENCE_NOT_FOUND');
 }
@@ -201,8 +213,9 @@ export class MemoryRepository {
 
   promoteEvents(input) {
     return this.#mutate(() => {
-      const data = ownObject(input, ['jobId', 'candidates', 'retain', 'diary', 'discard']);
+      const data = ownObject(input, ['jobId', 'candidates', 'retain', 'diary', 'discard', 'lease']);
       const jobId = text(data.jobId, LIMIT.key);
+      const lease = reviewLease(data.lease);
       const maximum = Math.min(this.config.reviewBatchSize, LIMIT.reviewBatch);
       const candidates = list(data.candidates, maximum, 1).map((candidate) => {
         const item = ownObject(candidate, ['id', 'version']);
@@ -220,15 +233,17 @@ export class MemoryRepository {
       return (db) => {
         const job = db.prepare('SELECT * FROM review_jobs WHERE id = ?').get(jobId);
         if (!job) fail('MEMORY_REFERENCE_NOT_FOUND');
+        const now = integer(this.clock.now());
+        assertLease(job, lease, now);
         const jobIds = references(JSON.parse(job.source_ids_json), 1);
         if (job.kind !== 'short-term' || !['queued', 'leased'].includes(job.state)
           || jobIds.length !== ids.length || jobIds.some((id) => !ids.includes(id))) fail('MEMORY_CONFLICT');
         const sources = new Map(candidates.map(({ id, version }) => {
           const row = db.prepare('SELECT * FROM memory_events WHERE id = ?').get(id);
-          if (!row || !['active', 'review-pending'].includes(row.state) || row.version !== version) fail('MEMORY_CONFLICT');
+          if (!row || !['active', 'review-pending'].includes(row.state) || row.version !== version
+            || (lease && (row.state !== 'review-pending' || row.review_due_at > now))) fail('MEMORY_CONFLICT');
           return [id, row];
         }));
-        const now = integer(this.clock.now());
         const expiresAt = addDays(now, this.config.longTermDays);
         const purgeDueAt = addDays(now, this.config.recycleDays);
         const items = retain.map((item) => {
@@ -252,6 +267,49 @@ export class MemoryRepository {
         db.prepare(`UPDATE review_jobs SET state = 'completed', lease_until = NULL, last_error_code = NULL,
           updated_at = ? WHERE id = ?`).run(now, jobId);
         return { items, diary: diaryEntries };
+      };
+    });
+  }
+
+  completeLongTermReview(input) {
+    return this.#mutate(() => {
+      const data = ownObject(input, ['jobId', 'candidates', 'diary', 'discard', 'lease']);
+      const jobId = text(data.jobId, LIMIT.key);
+      const lease = reviewLease(data.lease);
+      const maximum = Math.min(this.config.reviewBatchSize, LIMIT.reviewBatch);
+      const candidates = list(data.candidates, maximum, 1).map((candidate) => {
+        const item = ownObject(candidate, ['id', 'version']);
+        const version = integer(item.version);
+        if (version < 1) fail();
+        return { id: text(item.id, LIMIT.key), version };
+      });
+      const ids = candidates.map(({ id }) => id);
+      if (new Set(ids).size !== ids.length) fail();
+      const diary = list(data.diary, maximum).map((entry) => diaryDecision(entry, true));
+      const discard = references(data.discard);
+      const partition = [...diary.flatMap(({ sourceRefs }) => sourceRefs), ...discard];
+      if (partition.length !== ids.length || new Set(partition).size !== ids.length || partition.some((id) => !ids.includes(id))) fail();
+      return (db) => {
+        const now = integer(this.clock.now());
+        const job = db.prepare('SELECT * FROM review_jobs WHERE id=?').get(jobId);
+        if (!job) fail('MEMORY_REFERENCE_NOT_FOUND');
+        assertLease(job, lease, now);
+        const jobIds = references(JSON.parse(job.source_ids_json), 1);
+        if (job.kind !== 'long-term' || !['queued', 'leased'].includes(job.state)
+          || jobIds.length !== ids.length || jobIds.some((id) => !ids.includes(id))) fail('MEMORY_CONFLICT');
+        const sources = new Map(candidates.map(({ id, version }) => {
+          const row = db.prepare('SELECT * FROM memory_items WHERE id=?').get(id);
+          if (!row || row.state !== 'active' || row.version !== version || row.expires_at > now) fail('MEMORY_CONFLICT');
+          return [id, row];
+        }));
+        const diaryEntries = diary.map((entry) => appendDiaryRow(db, { ...entry,
+          visibility: strictest(entry.sourceRefs.map((id) => sources.get(id))),
+        }, text(this.idGenerator(), LIMIT.key), now));
+        const purgeDueAt = addDays(now, this.config.recycleDays);
+        for (const { id, version } of candidates) db.prepare(`UPDATE memory_items SET state='recycle',purge_due_at=?,
+          version=version+1,updated_at=? WHERE id=? AND version=?`).run(purgeDueAt, now, id, version);
+        db.prepare(`UPDATE review_jobs SET state='completed',lease_until=NULL,last_error_code=NULL,updated_at=? WHERE id=?`).run(now, jobId);
+        return { diary: diaryEntries };
       };
     });
   }

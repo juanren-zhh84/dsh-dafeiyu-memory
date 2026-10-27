@@ -17,6 +17,8 @@ test('configuration fixes the agreed retention, capacity, recall and review defa
     recallQuotas: { shortTerm: 8, longTerm: 6, diary: 3 },
     reviewBatchSize: 40,
     reviewTimeoutMs: 120_000,
+    reviewScanIntervalMs: 600_000,
+    reviewLeaseMs: 300_000,
     reviewMaxAttempts: 8,
     retryBaseMs: 15 * 60_000,
     retryMaxMs: 24 * 60 * 60_000,

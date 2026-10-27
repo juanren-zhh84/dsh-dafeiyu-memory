@@ -12,8 +12,12 @@ export async function apply(ctx, config = {}, dependencies = {}) {
   const paths = resolveMemoryPaths(dependencies);
   const database = await MemoryDatabase.open(paths.database);
   try {
-    const service = new DafeiyuMemoryService(ctx, { config: resolvedConfig, paths, database });
-    ctx.effect(() => () => service.dispose());
+    const { clock, timer, reviewModel } = dependencies;
+    const service = new DafeiyuMemoryService(ctx, { config: resolvedConfig, paths, database, clock, timer, reviewModel });
+    ctx.effect(() => {
+      service.scheduler.start();
+      return () => service.dispose();
+    });
   } catch (error) {
     await database.close();
     throw error;

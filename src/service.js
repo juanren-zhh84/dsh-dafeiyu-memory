@@ -3,9 +3,11 @@ import { MEMORY_SERVICE_NAME, memoryError } from './contracts.js';
 import { MemoryRepository } from './memory/repository.js';
 import { RecallEngine } from './memory/recall.js';
 import { ReviewModel } from './review/model-client.js';
+import { ReviewLifecycle } from './review/lifecycle.js';
+import { ReviewScheduler } from './review/scheduler.js';
 
 export class DafeiyuMemoryService extends Service {
-  constructor(ctx, { config, paths, database, repository, clock, idGenerator }) {
+  constructor(ctx, { config, paths, database, repository, clock, idGenerator, reviewModel, timer }) {
     super(ctx, MEMORY_SERVICE_NAME);
     this.config = config;
     this.paths = paths;
@@ -13,7 +15,9 @@ export class DafeiyuMemoryService extends Service {
     this.writeQueue = database.writeQueue;
     this.repository = repository ?? new MemoryRepository({ database, writeQueue: this.writeQueue, config, clock, idGenerator });
     this.recallEngine = new RecallEngine({ database, writeQueue: this.writeQueue, clock });
-    this.reviewModel = new ReviewModel(ctx, { config });
+    this.reviewModel = reviewModel ?? new ReviewModel(ctx, { config });
+    this.reviewLifecycle = new ReviewLifecycle({ database, repository: this.repository, reviewModel: this.reviewModel, config, clock });
+    this.scheduler = new ReviewScheduler({ lifecycle: this.reviewLifecycle, intervalMs: config.reviewScanIntervalMs, timer });
     this.state = 'ready';
   }
 
@@ -29,7 +33,7 @@ export class DafeiyuMemoryService extends Service {
   async recordEvent(input) { assertReady(this); return this.repository.insertEvent(input); }
   async search() { return unavailable(this, 'search'); }
   async importExisting() { return unavailable(this, 'importExisting'); }
-  async runDueReviews() { return unavailable(this, 'runDueReviews'); }
+  async runDueReviews() { assertReady(this); return this.reviewLifecycle.runDueReviews(); }
   async backup() { return unavailable(this, 'backup'); }
   async restoreRecycleItem(input) { assertReady(this); return this.repository.restoreRecycle(input); }
   async purgeRecycleItem() { return unavailable(this, 'purgeRecycleItem'); }
@@ -37,6 +41,7 @@ export class DafeiyuMemoryService extends Service {
 
   async dispose() {
     this.state = 'disposed';
+    await this.scheduler.dispose();
     await this.database.close();
   }
 }
