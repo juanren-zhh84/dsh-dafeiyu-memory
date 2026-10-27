@@ -109,7 +109,7 @@ test('long-term final review is due thirty days from promotion and diary visibil
   assert.equal(s.rows('diary_entries')[0].visibility, 'owner-private');
   assert.equal(s.rows('memory_items')[0].state, 'recycle');
   assert.equal(s.rows('memory_items')[0].purge_due_at, s.time.value + 7 * DAY);
-  assert.equal(s.rows('review_jobs').find((j) => j.kind === 'long-term').batch_key, `long-term:${item.id}`);
+  assert.match(s.rows('review_jobs').find((j) => j.kind === 'long-term').batch_key, /^long-term:[a-f0-9]{64}$/);
 });
 
 test('long-term scan creates one non-overlapping job per item even while queued, failed or completed', async (t) => {
@@ -117,10 +117,79 @@ test('long-term scan creates one non-overlapping job per item even while queued,
   await retained(s);
   s.time.value += 30 * DAY;
   assert.equal((await s.lifecycle.scan()).queued, 1);
-  for (const state of ['queued', 'failed', 'completed']) {
+  for (const state of ['queued', 'leased', 'failed', 'completed']) {
     await s.database.write((db) => db.prepare("UPDATE review_jobs SET state=? WHERE kind='long-term'").run(state));
     assert.equal((await s.lifecycle.scan()).queued, 0);
   }
+});
+
+for (const kind of ['short-term', 'long-term']) test(`${kind} restored after completion creates a new versioned job and can complete again`, async (t) => {
+  const s = await setup(t);
+  const original = kind === 'short-term' ? await s.repository.insertEvent(eventInput()) : await retained(s);
+  const table = kind === 'short-term' ? 'memory_events' : 'memory_items';
+  const dueColumn = kind === 'short-term' ? 'review_due_at' : 'expires_at';
+  const originalDue = s.rows(table)[0][dueColumn];
+  s.time.value = originalDue;
+  assert.equal((await s.lifecycle.runDueReviews()).completed, 1);
+  const oldJob = s.rows('review_jobs').find((j) => j.kind === kind);
+  assert.equal(oldJob.state, 'completed');
+  const recycled = s.rows(table)[0];
+  const restored = await s.repository.restoreRecycle({ kind: kind === 'short-term' ? 'event' : 'item', id: original.id, version: recycled.version });
+  assert.equal(restored.version, recycled.version + 1);
+  assert.equal(s.rows(table)[0][dueColumn], originalDue);
+  assert.deepEqual(await s.lifecycle.scan(), { queued: 1 });
+  assert.deepEqual(await s.lifecycle.scan(), { queued: 0 });
+  const jobs = s.rows('review_jobs').filter((j) => j.kind === kind);
+  assert.equal(jobs.length, 2);
+  const newJob = jobs.find((j) => j.id !== oldJob.id);
+  assert.notEqual(newJob.batch_key, oldJob.batch_key);
+  assert.match(newJob.batch_key, new RegExp(`^${kind}:[a-f0-9]{64}$`));
+  assert.deepEqual(JSON.parse(newJob.source_ids_json), [original.id]);
+  assert.deepEqual(await s.lifecycle.runDueReviews(), { queued: 0, completed: 1, retried: 0, failed: 0 });
+  assert.equal(s.rows(table)[0].state, 'recycle');
+  assert.equal(s.rows(table)[0].version, restored.version + 1);
+  assert.equal(s.rows(table)[0][dueColumn], originalDue);
+  assert.equal(s.rows(table)[0].purge_due_at, s.time.value + 7 * DAY);
+  assert.ok(s.rows('review_jobs').filter((j) => j.kind === kind).every((j) => j.state === 'completed'));
+  assert.equal(s.calls.length, 2);
+});
+
+for (const kind of ['short-term', 'long-term']) test(`${kind} scan hashes external IDs and deduplicates the same version in every job state`, async (t) => {
+  const s = await setup(t);
+  if (kind === 'short-term') await s.repository.insertEvent(eventInput()); else await retained(s);
+  const table = kind === 'short-term' ? 'memory_events' : 'memory_items';
+  await s.database.write((db) => db.prepare(`UPDATE ${table} SET id=?`).run('qq:account-secret/path?query=1'));
+  s.time.value += (kind === 'short-term' ? 7 : 30) * DAY;
+  const other = new ReviewLifecycle(s.options); t.after(() => other.dispose());
+  const summaries = await Promise.all([s.lifecycle.scan(), other.scan()]);
+  assert.equal(summaries.reduce((total, s) => total + s.queued, 0), 1);
+  const job = s.rows('review_jobs').find((j) => j.kind === kind);
+  assert.match(job.batch_key, new RegExp(`^${kind}:[a-f0-9]{64}$`));
+  assert.doesNotMatch(job.batch_key, /account-secret|path|query/);
+  for (const state of ['queued', 'leased', 'failed', 'completed']) {
+    await s.database.write((db) => {
+      db.prepare('UPDATE review_jobs SET state=? WHERE id=?').run(state, job.id);
+      db.prepare(`UPDATE ${table} SET state='active'`).run();
+    });
+    assert.equal((await s.lifecycle.scan()).queued, 0);
+    assert.equal(s.rows('review_jobs').filter((j) => j.kind === kind).length, 1);
+  }
+});
+
+for (const state of ['queued', 'leased', 'failed']) test(`long-term old-version ${state} task ${state === 'failed' ? 'allows' : 'blocks'} a new-version job`, async (t) => {
+  const s = await setup(t);
+  await retained(s); s.time.value += 30 * DAY;
+  assert.equal((await s.lifecycle.scan()).queued, 1);
+  const oldJob = s.rows('review_jobs').find((j) => j.kind === 'long-term');
+  await s.database.write((db) => {
+    db.prepare('UPDATE review_jobs SET state=? WHERE id=?').run(state, oldJob.id);
+    db.prepare('UPDATE memory_items SET version=version+1').run();
+  });
+  assert.equal((await s.lifecycle.scan()).queued, state === 'failed' ? 1 : 0);
+  assert.equal((await s.lifecycle.scan()).queued, 0);
+  const jobs = s.rows('review_jobs').filter((j) => j.kind === 'long-term');
+  assert.equal(jobs.length, state === 'failed' ? 2 : 1);
+  assert.equal(jobs.find((j) => j.id === oldJob.id).state, state);
 });
 
 for (const failure of ['model', 'protocol', 'transaction', 'version']) test(`${failure} failure changes only job retry state and reloads candidates on retry`, async (t) => {
@@ -219,7 +288,7 @@ test('long-term transaction rollback retains active item, no diary, and retry re
   assert.equal(s.rows('memory_items')[0].state, 'active'); assert.equal(s.rows('diary_entries').length, 0);
   await s.database.write((db) => { db.exec('DROP TRIGGER deny_item'); db.exec('UPDATE memory_items SET version=version+1'); });
   s.time.value = s.rows('review_jobs').find((j) => j.kind === 'long-term').next_attempt_at;
-  assert.equal((await s.lifecycle.runDueReviews()).completed, 1);
+  assert.deepEqual(await s.lifecycle.runDueReviews(), { queued: 0, completed: 1, retried: 0, failed: 0 });
   assert.equal(s.calls[1].candidates[0].version, 2);
 });
 

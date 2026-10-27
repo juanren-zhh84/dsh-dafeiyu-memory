@@ -41,8 +41,8 @@ export class ReviewLifecycle {
         let queued = 0;
         const createJob = (kind, rows) => {
           const ids = rows.map(({ id }) => id);
-          const batchKey = kind === 'long-term' ? `long-term:${ids[0]}`
-            : `short-term:${createHash('sha256').update(JSON.stringify([kind, ids])).digest('hex')}`;
+          const candidates = rows.map(({ id, version }) => ({ id, version }));
+          const batchKey = `${kind}:${createHash('sha256').update(JSON.stringify([kind, candidates])).digest('hex')}`;
           const result = db.prepare(`INSERT OR IGNORE INTO review_jobs
             (id,kind,batch_key,source_ids_json,state,due_at,next_attempt_at,created_at,updated_at)
             VALUES (?,?,?,?,'queued',?,?,?,?)`).run(randomUUID(), kind, batchKey, JSON.stringify(ids),
@@ -55,15 +55,18 @@ export class ReviewLifecycle {
         let batch = [];
         let group;
         const flush = () => { if (batch.length) createJob('short-term', batch); batch = []; };
-        for (const row of db.prepare(`SELECT id, conversation_kind, conversation_key, review_due_at FROM memory_events
+        for (const row of db.prepare(`SELECT id, version, conversation_kind, conversation_key, review_due_at FROM memory_events
           WHERE state='active' AND review_due_at<=? ORDER BY conversation_kind,conversation_key,occurred_at,id`).all(now)) {
           const key = JSON.stringify([row.conversation_kind, row.conversation_key]);
           if (key !== group || batch.length >= maximum) flush();
           group = key; batch.push(row);
         }
         flush();
-        for (const row of db.prepare(`SELECT id,expires_at FROM memory_items
-          WHERE state='active' AND expires_at<=? ORDER BY expires_at,id`).all(now)) createJob('long-term', [row]);
+        for (const row of db.prepare(`SELECT id,version,expires_at FROM memory_items
+          WHERE state='active' AND expires_at<=? AND NOT EXISTS (
+            SELECT 1 FROM review_jobs AS job,json_each(job.source_ids_json) AS source
+            WHERE job.kind='long-term' AND job.state IN ('queued','leased') AND source.value=memory_items.id
+          ) ORDER BY expires_at,id`).all(now)) createJob('long-term', [row]);
         return { queued };
       });
     } catch { throw safeError('MEMORY_STORAGE_FAILED'); }
