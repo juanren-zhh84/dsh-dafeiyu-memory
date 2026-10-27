@@ -107,7 +107,15 @@ test('database initialization failure leaves no registered service or disposer',
   const ctx = createFakeContext();
   const dshHome = createTempHome();
   writeFileSync(join(dshHome, 'dafeiyu-memory'), 'blocks the database directory');
-  await assert.rejects(async () => apply(ctx, {}, { dshHome }));
+  await assert.rejects(apply(ctx, {}, { dshHome }), (error) => {
+    assert.equal(error.code, 'MEMORY_DATABASE_OPEN_FAILED');
+    assert.equal(error.message, 'Memory database could not be opened');
+    assert.equal(String(error.stack), 'Error: Memory database could not be opened');
+    assert.equal(error.message.includes(dshHome), false);
+    assert.deepEqual(Object.getOwnPropertyNames(error).sort(), ['code', 'message', 'stack']);
+    assert.equal(JSON.stringify(error).includes(dshHome), false);
+    return true;
+  });
   assert.equal(ctx.get('dafeiyuMemory'), undefined);
   assert.equal(ctx.disposers.length, 0);
 });

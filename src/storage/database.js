@@ -5,6 +5,12 @@ import { memoryError } from '../contracts.js';
 import { migrate, queryOne, SCHEMA_VERSION } from './migrations.js';
 import { WriteQueue } from './write-queue.js';
 
+const OPEN_ERROR_MESSAGES = Object.freeze({
+  MEMORY_DATABASE_OPEN_FAILED: 'Memory database could not be opened',
+  MEMORY_SCHEMA_TOO_NEW: 'Memory database schema is newer than this runtime',
+  MEMORY_MIGRATION_BACKUP_REQUIRED: 'Back up the existing memory database before migration',
+});
+
 export class MemoryDatabase {
   #database;
   #statements = new Map();
@@ -13,9 +19,10 @@ export class MemoryDatabase {
   #closed = false;
 
   static async open(path, { beforeMigrate } = {}) {
-    mkdirSync(dirname(path), { recursive: true });
-    const database = new DatabaseSync(path);
+    let database;
     try {
+      mkdirSync(dirname(path), { recursive: true });
+      database = new DatabaseSync(path);
       const currentVersion = queryOne(database, 'PRAGMA user_version').user_version;
       if (currentVersion > SCHEMA_VERSION) {
         throw memoryError('MEMORY_SCHEMA_TOO_NEW', 'Memory database schema is newer than this runtime');
@@ -35,8 +42,14 @@ export class MemoryDatabase {
       if (queryOne(database, 'PRAGMA auto_vacuum').auto_vacuum !== 2) database.exec('VACUUM');
       return new MemoryDatabase(database);
     } catch (error) {
-      database.close();
-      throw error;
+      // Cleanup errors must not replace the sanitized public initialization failure.
+      try { database?.close(); } catch {}
+      const code = Object.hasOwn(OPEN_ERROR_MESSAGES, error?.code)
+        ? error.code : 'MEMORY_DATABASE_OPEN_FAILED';
+      // Recreate even known errors; never retain native message/path/cause fields.
+      const publicError = memoryError(code, OPEN_ERROR_MESSAGES[code]);
+      publicError.stack = `${publicError.name}: ${publicError.message}`;
+      throw publicError;
     }
   }
 
@@ -84,7 +97,22 @@ export class MemoryDatabase {
             get(target, property) {
               const value = Reflect.get(target, property, target);
               return typeof value === 'function'
-                ? (...args) => { assertActive(); return value.apply(target, args); }
+                ? (...args) => {
+                  assertActive();
+                  const result = value.apply(target, args);
+                  if (property !== 'iterate') return result;
+                  // The native iterator executes lazily, so every resume needs the same guard.
+                  return Object.freeze({
+                    next: (...values) => { assertActive(); return result.next(...values); },
+                    return: (...values) => { assertActive(); return result.return(...values); },
+                    throw: (error) => {
+                      assertActive();
+                      result.return();
+                      throw error;
+                    },
+                    [Symbol.iterator]() { assertActive(); return this; },
+                  });
+                }
                 : value;
             },
           }));

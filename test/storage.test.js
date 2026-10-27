@@ -147,6 +147,69 @@ test('rejected async transactions cannot write through captured statements after
   assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM memory_events').get().count), 0);
 });
 
+test('captured write iterators cannot execute after transaction rollback', async (t) => {
+  const { database } = await openDatabase(t);
+  database.transaction((db) => db.exec('CREATE TABLE iterator_probe (id INTEGER PRIMARY KEY) STRICT'));
+  let iterator;
+  assert.throws(() => database.transaction((db) => {
+    iterator = db.prepare('INSERT INTO iterator_probe VALUES (1) RETURNING id').iterate();
+    throw new Error('abort iterator transaction');
+  }), /abort iterator transaction/);
+  for (const operation of [() => iterator.next(), () => iterator.return(), () => iterator.throw(new Error('stop')), () => iterator[Symbol.iterator]()]) {
+    assert.throws(operation, { code: 'MEMORY_TRANSACTION_FINISHED' });
+  }
+  assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM iterator_probe').get().count), 0);
+});
+
+test('transaction iterators support normal iteration and early return within their scope', async (t) => {
+  const { database } = await openDatabase(t);
+  let iterator;
+  database.transaction((db) => {
+    db.exec('CREATE TABLE normal_iterator_probe (id INTEGER PRIMARY KEY) STRICT');
+    assert.deepEqual(Array.from(db.prepare('INSERT INTO normal_iterator_probe VALUES (1) RETURNING id').iterate(), (row) => row.id), [1]);
+    assert.deepEqual(Array.from(db.prepare("SELECT value FROM json_each('[1,2,3]')").iterate(), (row) => row.value), [1, 2, 3]);
+    iterator = db.prepare("SELECT value FROM json_each('[4,5,6]')").iterate();
+    for (const row of iterator) {
+      assert.equal(row.value, 4);
+      break;
+    }
+    assert.equal(iterator.next().done, true);
+    const interrupted = db.prepare("SELECT value FROM json_each('[7,8]')").iterate();
+    const interruption = new Error('stop scoped iteration');
+    assert.throws(() => interrupted.throw(interruption), (error) => error === interruption);
+    assert.equal(interrupted.next().done, true);
+  });
+  assert.equal(database.read((db) => db.prepare('SELECT count(*) AS count FROM normal_iterator_probe').get().count), 1);
+  assert.throws(() => iterator.next(), { code: 'MEMORY_TRANSACTION_FINISHED' });
+});
+
+test('database open redacts native directory initialization errors', async () => {
+  const home = createTempHome();
+  const blockedDirectory = join(home, 'blocked');
+  writeFileSync(blockedDirectory, 'blocks the database directory');
+  await assert.rejects(MemoryDatabase.open(join(blockedDirectory, 'memory.sqlite')), (error) => {
+    assert.equal(error.code, 'MEMORY_DATABASE_OPEN_FAILED');
+    assert.equal(error.message, 'Memory database could not be opened');
+    assert.equal(String(error.stack), 'Error: Memory database could not be opened');
+    assert.equal(error.message.includes(home), false);
+    assert.deepEqual(Object.getOwnPropertyNames(error).sort(), ['code', 'message', 'stack']);
+    assert.equal(JSON.stringify(error).includes(home), false);
+    return true;
+  });
+});
+
+test('database open redacts native SQLite open errors', async () => {
+  const home = createTempHome();
+  await assert.rejects(MemoryDatabase.open(home), (error) => {
+    assert.equal(error.code, 'MEMORY_DATABASE_OPEN_FAILED');
+    assert.equal(error.message, 'Memory database could not be opened');
+    assert.equal(String(error.stack), 'Error: Memory database could not be opened');
+    assert.deepEqual(Object.getOwnPropertyNames(error).sort(), ['code', 'message', 'stack']);
+    assert.equal(error.message.includes(home), false);
+    return true;
+  });
+});
+
 test('prepared statements are reused and finalized when the database closes', async (t) => {
   const { database } = await openDatabase(t);
   const statement = database.read((db) => db.prepare('SELECT 1 AS n'));
@@ -283,7 +346,16 @@ test('backup failure preserves existing database contents and never starts migra
   legacy.exec("CREATE TABLE original (value TEXT) STRICT; INSERT INTO original VALUES ('preserved')");
   legacy.close();
   const bytes = readFileSync(path);
-  await assert.rejects(MemoryDatabase.open(path, { beforeMigrate: async () => { throw new Error('backup failed'); } }), /backup failed/);
+  await assert.rejects(MemoryDatabase.open(path, { beforeMigrate: async () => {
+    throw Object.assign(new Error(`backup failed at ${path}`), { path, cause: new Error(path) });
+  } }), (error) => {
+    assert.equal(error.code, 'MEMORY_DATABASE_OPEN_FAILED');
+    assert.equal(error.message, 'Memory database could not be opened');
+    assert.equal(String(error.stack), 'Error: Memory database could not be opened');
+    assert.deepEqual(Object.getOwnPropertyNames(error).sort(), ['code', 'message', 'stack']);
+    assert.equal(error.message.includes(path), false);
+    return true;
+  });
   assert.deepEqual(readFileSync(path), bytes);
 });
 
@@ -293,7 +365,7 @@ test('open migration failure retains the original database instead of creating a
   original.exec("CREATE TABLE memory_events (original TEXT) STRICT; INSERT INTO memory_events VALUES ('preserved')");
   original.close();
   let backedUp = false;
-  await assert.rejects(MemoryDatabase.open(path, { beforeMigrate: () => { backedUp = true; } }), /already exists/);
+  await assert.rejects(MemoryDatabase.open(path, { beforeMigrate: () => { backedUp = true; } }), { code: 'MEMORY_DATABASE_OPEN_FAILED' });
   assert.equal(backedUp, true);
   const check = new DatabaseSync(path);
   t.after(() => check.close());
