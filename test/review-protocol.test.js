@@ -228,3 +228,42 @@ test('nested stream accessors and proxy failures are rejected without leaking co
   ]) await assert.rejects(review(chunks), (e) => safeError(e, 'MEMORY_REVIEW_STREAM_FAILED'));
   assert.equal(reads, 0);
 });
+
+for (const chunk of [
+  { type: 'reasoning-delta', index: 0, text: 'secret reasoning' },
+  { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'secret reasoning' } },
+  { type: 'block-start', index: 2, blockType: 'reasoning' },
+]) test(`rejects ${chunk.type} reasoning after the text phase begins`, async () => {
+  await assert.rejects(review([
+    { type: 'reasoning-delta', index: 0, text: 'secret prefix' },
+    { type: 'text-delta', index: 1, text: JSON.stringify(decision()) },
+    chunk,
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), (e) => safeError(e, 'MEMORY_REVIEW_STREAM_FAILED'));
+});
+
+test('completed reasoning blocks then one text block still succeed', async () => {
+  const raw = JSON.stringify(decision());
+  assert.deepEqual((await review([
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'reasoning-delta', index: 0, text: 'first' },
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'first' } },
+    { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'second' } },
+    { type: 'block-start', index: 2, blockType: 'text' },
+    { type: 'text-delta', index: 2, text: raw },
+    { type: 'block-end', index: 2, block: { type: 'text', text: raw } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])).discard, ['e3']);
+});
+
+for (const chunk of [
+  { type: 'reasoning-delta', index: 0, text: 'secret extra' },
+  { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'secret extra' } },
+]) test(`rejects ${chunk.type} for an already completed reasoning block`, async () => {
+  await assert.rejects(review([
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'secret original' } },
+    chunk,
+    { type: 'text-delta', index: 1, text: JSON.stringify(decision()) },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), (e) => safeError(e, 'MEMORY_REVIEW_STREAM_FAILED'));
+});

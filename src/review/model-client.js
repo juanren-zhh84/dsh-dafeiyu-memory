@@ -73,13 +73,14 @@ async function consume(stream, signal) {
         const type = chunk.type === 'block-start' ? chunk.blockType : chunk.type === 'block-end' ? chunk.block?.type
           : chunk.type === 'text-delta' ? 'text' : chunk.type === 'reasoning-delta' ? 'reasoning' : undefined;
         if (!['text', 'reasoning'].includes(type) || !Number.isSafeInteger(chunk.index) || chunk.index < 0) throw new Error();
+        if (type === 'reasoning' && textIndex !== undefined) throw new Error();
         const previous = blocks.get(chunk.index);
         if (previous && (previous.type !== type || previous.closed || chunk.type === 'block-start')) throw new Error();
         if (!previous) {
           if (type === 'text') {
             if (textIndex !== undefined) throw new Error();
             textIndex = chunk.index;
-          } else if (textIndex !== undefined) throw new Error();
+          }
         }
         if (chunk.type !== 'block-start') {
           const text = chunk.type === 'block-end' ? chunk.block.text : chunk.text;
