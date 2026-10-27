@@ -2,10 +2,12 @@ import { Service } from '@deepseek-ai/cordis';
 import { MEMORY_SERVICE_NAME, memoryError } from './contracts.js';
 
 export class DafeiyuMemoryService extends Service {
-  constructor(ctx, { config, paths }) {
+  constructor(ctx, { config, paths, database }) {
     super(ctx, MEMORY_SERVICE_NAME);
     this.config = config;
     this.paths = paths;
+    this.database = database;
+    this.writeQueue = database.writeQueue;
     this.state = 'ready';
   }
 
@@ -29,6 +31,7 @@ export class DafeiyuMemoryService extends Service {
 
   async dispose() {
     this.state = 'disposed';
+    await this.database.close();
   }
 }
 

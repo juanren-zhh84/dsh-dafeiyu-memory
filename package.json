@@ -6,7 +6,7 @@
   "main": "./src/index.js",
   "exports": { ".": "./src/index.js", "./package.json": "./package.json" },
   "files": ["src/", "cordis.patch.yml"],
-  "engines": { "node": ">=24.0.0" },
+  "engines": { "node": ">=24.22.0" },
   "scripts": { "test": "node --test test/*.test.js" },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
