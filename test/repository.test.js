@@ -295,7 +295,7 @@ test('service delegates recording, diary append, recycle restore and counts whil
   assert.equal(service.recall(), '');
   assert.equal(service.database.read((db) => db.prepare('SELECT expires_at FROM memory_items WHERE id = ?').get(item.id).expires_at), item.expiresAt);
   assert.equal(service.status().diary, 1);
-  await assert.rejects(service.purgeRecycleItem({}), { code: 'MEMORY_NOT_IMPLEMENTED' });
+  await assert.rejects(service.purgeRecycleItem({}), { code: 'MEMORY_INVALID_INPUT' });
 });
 
 test('explicit null diary fields are rejected instead of being treated as omitted defaults', async (t) => {

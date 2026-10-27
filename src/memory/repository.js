@@ -153,6 +153,22 @@ function normalizeEvent(input, config) {
     externalKey: JSON.stringify([source, sourceKey]) };
 }
 
+/** A validated minimal DTO for offline persistence, without retaining caller objects. */
+export function snapshotEventInput(input, config = DEFAULT_CONFIG) {
+  const fields = ['source', 'sourceKey', 'conversationKind', 'conversationKey', 'actorKey', 'actorName', 'direction',
+    'contentText', 'occurredAt', 'visibility', 'mediaRefs'];
+  const data = ownObject(input, fields);
+  if (Object.hasOwn(data, 'mediaRefs')) data.mediaRefs = mediaReferences(data.mediaRefs);
+  const normalized = normalizeEvent(data, config);
+  const snapshot = {};
+  for (const key of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(data, key);
+    if (descriptor) snapshot[key] = key === 'mediaRefs' ? mediaReferences(descriptor.value) : descriptor.value;
+  }
+  snapshot.sourceKey = normalized.sourceKey;
+  return snapshot;
+}
+
 export class MemoryRepository {
   constructor({ database, writeQueue = database.writeQueue, config = DEFAULT_CONFIG, clock = Date, idGenerator = randomUUID }) {
     this.database = database;

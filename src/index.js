@@ -2,6 +2,8 @@ import { resolveConfig } from './config.js';
 import { resolveMemoryPaths } from './paths.js';
 import { DafeiyuMemoryService } from './service.js';
 import { MemoryDatabase } from './storage/database.js';
+import { BackupManager } from './maintenance/backup.js';
+import { WriteQueue } from './storage/write-queue.js';
 
 export const name = 'dafeiyu-memory';
 export const inject = ['llm', 'agentDefaultModel'];
@@ -10,10 +12,15 @@ export const inject = ['llm', 'agentDefaultModel'];
 export async function apply(ctx, config = {}, dependencies = {}) {
   const resolvedConfig = resolveConfig(config);
   const paths = resolveMemoryPaths(dependencies);
-  const database = await MemoryDatabase.open(paths.database);
+  const database = await MemoryDatabase.open(paths.database, { beforeMigrate: async ({ database: source }) => {
+    const writeQueue = new WriteQueue();
+    const manager = new BackupManager({ paths, config: resolvedConfig, clock: dependencies.clock,
+      database: { writeQueue, backupTo: (path, implementation) => implementation(source, path) }, ...dependencies.maintenance });
+    try { await manager.create('migration', true); } finally { await writeQueue.close(); }
+  } });
   try {
-    const { clock, timer, reviewModel } = dependencies;
-    const service = new DafeiyuMemoryService(ctx, { config: resolvedConfig, paths, database, clock, timer, reviewModel });
+    const { clock, timer, reviewModel, maintenance } = dependencies;
+    const service = new DafeiyuMemoryService(ctx, { config: resolvedConfig, paths, database, clock, timer, reviewModel, maintenance });
     ctx.effect(() => {
       service.scheduler.start();
       return () => service.dispose();

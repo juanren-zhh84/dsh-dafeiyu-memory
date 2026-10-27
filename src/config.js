@@ -6,6 +6,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   recycleDays: 7,
   diskSoftLimitBytes: 1024 ** 3,
   diskWarningRatio: 0.8,
+  backupRetentionDays: 30,
+  backupLimitBytes: 268435456,
+  spoolLimitBytes: 16777216,
+  spoolMaxEntries: 10000,
+  purgeBatchSize: 100,
+  incrementalVacuumFreeRatio: 0.2,
   recallQuotas: Object.freeze({ shortTerm: 8, longTerm: 6, diary: 3 }),
   reviewBatchSize: 40,
   reviewTimeoutMs: 120_000,
@@ -34,6 +40,7 @@ export function resolveConfig(overrides = {}) {
     'shortTermDays', 'longTermDays', 'recycleDays', 'diskSoftLimitBytes',
     'reviewBatchSize', 'reviewTimeoutMs', 'reviewMaxAttempts', 'reviewScanIntervalMs', 'reviewLeaseMs',
     'retryBaseMs', 'retryMaxMs',
+    'backupRetentionDays', 'backupLimitBytes', 'spoolLimitBytes', 'spoolMaxEntries', 'purgeBatchSize',
   ]) {
     if (!Number.isSafeInteger(config[name]) || config[name] <= 0) invalid(name);
   }
@@ -42,6 +49,11 @@ export function resolveConfig(overrides = {}) {
   }
   if (config.diskSoftLimitBytes < 256 * 1024 ** 2) invalid('diskSoftLimitBytes');
   if (config.diskWarningRatio !== 0.8) invalid('diskWarningRatio');
+  if (config.backupLimitBytes < 32 * 1024 ** 2) invalid('backupLimitBytes');
+  if (config.spoolLimitBytes < 1024 ** 2) invalid('spoolLimitBytes');
+  if (config.purgeBatchSize > 100) invalid('purgeBatchSize');
+  if (!Number.isFinite(config.incrementalVacuumFreeRatio) || config.incrementalVacuumFreeRatio <= 0
+    || config.incrementalVacuumFreeRatio > 1) invalid('incrementalVacuumFreeRatio');
   for (const name of ['shortTerm', 'longTerm', 'diary']) {
     if (!Number.isSafeInteger(config.recallQuotas[name]) || config.recallQuotas[name] <= 0) {
       invalid(`recallQuotas.${name}`);

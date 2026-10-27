@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup } from 'node:sqlite';
 import { memoryError } from '../contracts.js';
 import { migrate, queryOne, SCHEMA_VERSION } from './migrations.js';
 import { WriteQueue } from './write-queue.js';
@@ -161,6 +161,12 @@ export class MemoryDatabase {
   checkpoint() {
     this.#assertOpen();
     return this.#connection.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+  }
+
+  // Caller holds writeQueue for the whole asynchronous backup and publication.
+  backupTo(path, implementation = backup) {
+    this.#assertOpen();
+    return implementation(this.#database, path);
   }
 
   close() {
