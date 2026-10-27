@@ -1,0 +1,28 @@
+{
+  "name": "dsh-dafeiyu-memory",
+  "version": "0.1.0",
+  "description": "大肥鱼统一记忆插件",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": { ".": "./src/index.js", "./package.json": "./package.json" },
+  "files": ["src/", "cordis.patch.yml"],
+  "engines": { "node": ">=24.0.0" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-default-model": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-agent-default-model": { "optional": true },
+    "@deepseek-ai/dsh-host-webserver": { "optional": true }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

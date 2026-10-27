@@ -1,2 +1,10 @@
 .worktrees/
 .superpowers/
+node_modules/
+*.sqlite*
+backups/
+spool/
+reports/
+.tmp/
+test/tmp/
+coverage/
