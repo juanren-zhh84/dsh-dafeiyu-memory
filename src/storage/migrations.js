@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { memoryError } from '../contracts.js';
 
 const [schemaV1, schemaV2] = readFileSync(new URL('./schema.sql', import.meta.url), 'utf8').split('-- Schema version 2');
@@ -8,6 +9,24 @@ export const MIGRATIONS = Object.freeze([
   Object.freeze({ version: 2, sql: schemaV2 }),
 ]);
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
+
+/** Validate against a fresh database produced by the same canonical migrations, never a second schema list. */
+export function validateCurrentSchema(database) {
+  const expected = new DatabaseSync(':memory:');
+  try {
+    migrate(expected);
+    const schema = db => db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name,tbl_name').all();
+    if (queryOne(database, 'PRAGMA user_version').user_version !== SCHEMA_VERSION
+      || queryOne(database, 'PRAGMA quick_check').quick_check !== 'ok'
+      || JSON.stringify(schema(database)) !== JSON.stringify(schema(expected))) return false;
+    const metadata = database.prepare('SELECT key,value FROM schema_meta ORDER BY key').all();
+    if (JSON.stringify(metadata.map(x => x.key)) !== JSON.stringify(['migrated_at', 'migration_state', 'schema_version'])) return false;
+    const values = Object.fromEntries(metadata.map(x => [x.key, x.value]));
+    return values.schema_version === String(SCHEMA_VERSION) && values.migration_state === 'ready'
+      && /^\d+$/.test(values.migrated_at) && Number.isSafeInteger(Number(values.migrated_at));
+  } catch { return false; }
+  finally { expected.close(); }
+}
 
 /** One-shot queries also finalize their statements; no handles escape migration setup. */
 export function queryOne(database, sql) {

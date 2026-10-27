@@ -35,7 +35,7 @@ $DshHome = Join-Path $env:USERPROFILE '.dsh'
 pwsh -NoProfile -File .\scripts\verify-local-install.ps1 -DshHome $DshHome
 ```
 
-检查器只读：查看版本、目录 ACL/最近现有父目录权限、离线数据库完整性/schema/计数、QQ 文件哈希、pet prepared state/构建产物及 Electron profile 引用。不会创建权限测试文件，不发送消息，不改模型/profile。`pending` 表示尚未安装或尚未由 Electron 激活，默认是可接受的准备阶段状态；`fail` 必须先处理。`required` 是核心检查，`optional` 仅为可选项。出现活动 WAL 时仅安全检查库头，返回 `DATABASE_ACTIVE_SAFE_HEADER_ONLY`，退出 DSH 后复查。profile 引用只说明配置存在，不证明进程内服务已经启动。
+检查器只读：查看版本、目录 ACL/最近现有父目录权限、离线数据库完整性/schema/计数、QQ 文件哈希、pet 的 canonical bridge/补丁、Git tag/远端/工作区和构建产物，以及 Electron profile 引用。不会创建权限测试文件，不发送消息，不改模型/profile。schema 对照由同一套迁移在内存生成，包含表/列/STRICT/索引/约束和迁移标记。`pending` 表示尚未安装或尚未由 Electron 激活，默认是可接受的准备阶段状态；`fail` 必须先处理。`required` 是核心检查，`optional` 仅为可选项。出现活动 WAL 时仅安全检查库头，返回 `DATABASE_ACTIVE_SAFE_HEADER_ONLY`，退出 DSH 后复查。profile 检查会解析实际 `file:` 路径（相对路径以 desktop profile 目录为基准），要求精确指向当前核心源码/pet 包根且包名版本正确；严格模式拒绝错误版本、不存在或错误路径。有效引用仍不证明进程内服务已经启动。
 
 ```powershell
 # 全部准备并经 Electron 切换后，再要求所有核心 pending 消失
@@ -84,7 +84,7 @@ node --disable-warning=ExperimentalWarning .\scripts\import-existing.mjs --dsh-h
 node --disable-warning=ExperimentalWarning .\scripts\import-existing.mjs --dsh-home $DshHome --apply
 ```
 
-apply 先运行同样的预检，成功后才打开真实统一库；每个有文件的来源先写备份并校验 SHA-256，再提交来源批次。原始来源文件永不修改。报告只输出来源类别、计数、稳定 code 和时间，不输出原文、账号或绝对来源路径。任何来源失败或 `SOURCE_CHANGED` 时立即停止后续操作，不以覆盖、删除或重建目标“修复”。若 apply 中途失败，已提交的独立批次保留，修复原因后重复导入会按 ledger 幂等跳过。
+apply 先运行同样的预检，再在 DSH_HOME 下创建同盘隔离 staging。预检文件集合、大小和 SHA-256 必须与 staging 来源快照完全相同，实际导入只消费该快照；所有批次和来源备份先在 staging 完成。发布前再次核对全部真实来源及目标库哈希：新目标一次重命名整个数据目录；已有目标先发布来源备份，最后通过同步哈希门后原子替换数据库文件。返回 `SOURCE_CHANGED` 时真实目标记录始终不变，新目标不留下半导入；失败 staging 自动清理。成功报告在数据库发布后才发布，报告失败以 `REPORT_FAILED` 单独表达。原始来源文件永不修改。报告只输出来源类别、计数、稳定 code 和时间，不输出原文、账号或绝对来源路径。任何来源失败时立即停止，不以覆盖、删除或重建异常目标“修复”。重复导入仍按 ledger 幂等跳过。
 
 ## 核验备份与回滚
 

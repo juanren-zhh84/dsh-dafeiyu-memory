@@ -13,27 +13,44 @@ import { fakeAurabot } from './helpers/fake-aurabot.js';
 import { setupConnector } from '../aurabot-module/dafeiyu-memory/index.mjs';
 import { recallForPet, recordPetExchange } from '../integrations/dsh-pet/bridge.ts';
 import { NOW, DAY } from './fixtures/events.js';
+import { apply } from '../src/index.js';
 
 const discard = ({ mode, candidates }) => ({ ...(mode === 'short-term' ? { retain: [] } : {}), diary: [], discard: candidates.map(x => x.id) });
 const retain = ({ mode, candidates }) => mode === 'short-term'
   ? { retain: candidates.map(x => ({ sourceIds: [x.id], kind: 'fact', content: x.content, importance: 0.8 })), diary: [], discard: [] }
   : discard({ mode, candidates });
-async function assemble(t, review = discard) {
+async function assemble(t, review = discard, pluginMode = false) {
   const home = mkdtempSync(join(tmpdir(), 'memory-acceptance-'));
   const paths = resolveMemoryPaths({ dshHome: home });
   const time = { value: NOW }, clock = { now: () => time.value };
   const model = { review: async input => review(input) };
-  const h = { home, time, model };
+  const h = { home, time, model, requests: [] };
   const open = async () => {
-    const database = await MemoryDatabase.open(paths.database);
-    h.service = new DafeiyuMemoryService(createFakeContext(), { paths, database, config: resolveConfig(), clock, reviewModel: model });
+    if (pluginMode) {
+      const ctx = createFakeContext(), timers = new Set();
+      await apply(ctx, {}, { dshHome: home, clock, reviewModel: model, timer: {
+        setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn),
+      } });
+      h.service = ctx.get('dafeiyuMemory');
+      // Await the same startup promise created by the actual plugin effect; do not manually run reviews.
+      await h.service.scheduler.start();
+      h.stop = async () => { for (const dispose of ctx.disposers) await dispose(); assert.equal(timers.size, 0); };
+      h.activeTimers = () => timers.size;
+      h.effects = ctx.disposers.length;
+    } else {
+      const database = await MemoryDatabase.open(paths.database);
+      h.service = new DafeiyuMemoryService(createFakeContext(), { paths, database, config: resolveConfig(), clock, reviewModel: model });
+      h.stop = () => h.service.dispose();
+    }
+    const recall = h.service.recall.bind(h.service);
+    h.service.recall = request => { h.requests.push(request); return recall(request); };
     h.qq = fakeAurabot(join(home, 'qq-module')); h.qq.service = h.service;
     setupConnector(h.qq.api, { clock });
   };
-  h.restart = async () => { h.qq.dispose(); await h.service.dispose(); await open(); };
+  h.restart = async () => { h.qq.dispose(); await h.stop(); await open(); };
   h.rows = table => h.service.database.read(db => db.prepare(`SELECT * FROM ${table}`).all());
   await open();
-  t.after(async () => { h.qq.dispose(); await h.service.dispose(); rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { h.qq.dispose(); await h.stop(); rmSync(home, { recursive: true, force: true }); });
   return h;
 }
 
@@ -44,7 +61,9 @@ test('01 群事实经公开 QQ 连接器整理后可在主人私聊召回', asyn
   const h = await assemble(t, retain);
   assert.equal(await h.qq.emit('message', group), false); await h.qq.tick();
   h.time.value += 7 * DAY; assert.equal((await h.service.runDueReviews()).completed, 1);
+  assert.equal(await h.qq.emit('message', { ...owner, messageId: 'acceptance-owner-question' }), false); await h.qq.tick();
   assert.match(h.qq.context(owner), /春季聚会定在湖边/);
+  assert.equal(h.requests.at(-1).queryText, owner.text);
 });
 test('02 主人私聊原文不进入其他群的连接器上下文', async t => {
   const h = await assemble(t, retain);
@@ -119,10 +138,11 @@ test('08 公开服务重复导入不增长且源文件哈希完全不变', async
   assert.deepEqual(hashes(), before);
 });
 test('09 关闭并重新组装公开服务后恢复到期任务且重复启动不重复', async t => {
-  const h = await assemble(t, retain); await h.qq.emit('message', group); await h.qq.tick();
+  const h = await assemble(t, retain, true); await h.qq.emit('message', group); await h.qq.tick();
   h.time.value += 7 * DAY; await h.service.reviewLifecycle.scan();
-  await h.restart(); assert.equal((await h.service.runDueReviews()).completed, 1);
+  await h.restart(); assert.equal(h.service.status().items.active, 1);
   await h.restart(); assert.equal((await h.service.runDueReviews()).completed, 0);
+  assert.equal(h.effects, 1); assert.equal(h.activeTimers(), 1);
   assert.equal(h.service.status().items.active, 1); assert.equal(h.rows('review_jobs').length, 1);
 });
 test('10 未安装抖音时核心服务、QQ 与 pet 完整工作且不创建其目录', async t => {

@@ -15,6 +15,22 @@ function Assert-NoLinks([string] $Path) {
         if ($next -eq $cursor) { break }; $cursor = $next
     }
 }
+function Test-LocalReference($Dependency, [string] $Expected, [string] $Name, [string] $Version, [string] $ProfileDirectory) {
+    try {
+        if ($Dependency -isnot [string] -or -not $Dependency.StartsWith('file:', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $value = $Dependency.Substring(5)
+        if ($value.StartsWith('//')) { $value = ([Uri]$Dependency).LocalPath }
+        elseif (-not [IO.Path]::IsPathFullyQualified($value)) { $value = Join-Path $ProfileDirectory $value }
+        $actual = [IO.Path]::GetFullPath($value).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $expectedPath = [IO.Path]::GetFullPath($Expected).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        if (-not $actual.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        Assert-NoLinks $actual
+        if (-not (Test-Path -LiteralPath $actual -PathType Container)) { return $false }
+        $manifestPath = Join-Path $actual 'package.json'; Assert-NoLinks $manifestPath
+        $identity = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        return $identity.name -ceq $Name -and $identity.version -ceq $Version
+    } catch { return $false }
+}
 try {
     if ([string]::IsNullOrWhiteSpace($DshHome)) { $DshHome = Join-Path $env:USERPROFILE '.dsh' }
     if (-not [IO.Path]::IsPathFullyQualified($DshHome)) { throw 'VERIFY_ABSOLUTE_HOME_REQUIRED' }
@@ -70,6 +86,23 @@ try {
             $tagCommit = (& git -C $petRoot rev-parse 'v0.3.8^{commit}' 2>$null | Out-String).Trim()
             $remote = (& git -C $petRoot remote get-url origin 2>$null | Out-String).Trim()
             $valid = $head -eq $state.baseCommit -and $head -eq $tagCommit -and $remote -ceq 'https://github.com/PC2005-cloud/dsh-pet.git' -and $remote -ceq $state.remote
+            $status = @(& git --no-optional-locks -c core.fsmonitor=false -C $petRoot status --porcelain --untracked-files=all 2>$null)
+            $valid = $valid -and $LASTEXITCODE -eq 0
+            $expectedStatus = @(" M ${prefix}src/host/index.ts", "?? ${prefix}src/host/unified-memory.ts", "?? ${prefix}src/host/unified-memory.test.ts")
+            $valid = $valid -and @(Compare-Object $status $expectedStatus).Count -eq 0
+            & git --no-optional-locks -C $petRoot diff --cached --quiet 2>$null
+            $valid = $valid -and $LASTEXITCODE -eq 0
+            $patchArgs = @('apply', '--reverse', '--check')
+            if ($state.packageRelative) { $patchArgs += "--directory=$($state.packageRelative)" }
+            $patchArgs += (Join-Path $repo 'integrations/dsh-pet/patches/0.3.8-unified-memory.patch')
+            & git --no-optional-locks -C $petRoot @patchArgs 2>$null | Out-Null
+            $valid = $valid -and $LASTEXITCODE -eq 0
+            $bridgePath = Join-Path ([IO.Path]::GetDirectoryName($petPackage)) 'src/host/unified-memory.ts'; Assert-NoLinks $bridgePath
+            if (Test-Path -LiteralPath $bridgePath -PathType Leaf) {
+                $bridge = (Get-Content -LiteralPath $bridgePath -Raw).Replace("`r`n", "`n")
+                $canonicalBridge = (Get-Content -LiteralPath (Join-Path $repo 'integrations/dsh-pet/bridge.ts') -Raw).Replace("`r`n", "`n")
+                $valid = $valid -and $bridge -ceq $canonicalBridge
+            } else { $valid = $false }
         }
         foreach ($file in $state.files) {
             $path = [IO.Path]::GetFullPath((Join-Path $petRoot $file.path))
@@ -79,16 +112,34 @@ try {
         }
         $buildPath = Join-Path ([IO.Path]::GetDirectoryName($petPackage)) 'lib/index.js'; Assert-NoLinks $buildPath
         $built = Test-Path -LiteralPath $buildPath -PathType Leaf
+        if ($built) {
+            foreach ($relative in @('lib/types/index.d.ts', 'runtime/electron-helper/shared-core.js')) {
+                $artifact = Join-Path ([IO.Path]::GetDirectoryName($petPackage)) $relative; Assert-NoLinks $artifact
+                $valid = $valid -and (Test-Path -LiteralPath $artifact -PathType Leaf) -and (Get-Item -LiteralPath $artifact).Length -gt 0
+            }
+            $compiled = Get-Content -LiteralPath $buildPath -Raw
+            $valid = $valid -and $compiled.Contains('PET_MEMORY_RECORDED') -and $compiled.Contains('PET_MEMORY_RECORD_FAILED') -and $compiled.Contains('dafeiyuMemory')
+            & node --check $buildPath 2>$null | Out-Null
+            $valid = $valid -and $LASTEXITCODE -eq 0
+        }
         Add-Check 'PET_PREPARED' $(if ($valid -and $built) { 'pass' } elseif ($valid) { 'pending' } else { 'fail' }) $true @{ version = $pet.version; code = $(if ($built) { 'BUILD_PRESENT' } else { 'BUILD_PENDING' }) }
     } else { Add-Check 'PET_PREPARED' 'pending' $true 'SOURCE_NOT_PREPARED' }
     $profile = Join-Path $DshHome 'profiles/desktop/package.json'; Assert-NoLinks $profile
     $coreRef = 'pending'; $petRef = 'pending'
+    $petPackageRoot = $petRoot
+    if (-not (Test-Path -LiteralPath (Join-Path $petRoot 'package.json') -PathType Leaf)) { $petPackageRoot = Join-Path $petRoot 'dsh-pet' }
     if (Test-Path -LiteralPath $profile -PathType Leaf) {
         $manifest = Get-Content -LiteralPath $profile -Raw | ConvertFrom-Json
         if ($manifest.PSObject.Properties.Name -contains 'dependencies') {
             $deps = $manifest.dependencies
-            if ($deps.PSObject.Properties.Name -contains 'dsh-dafeiyu-memory') { $coreRef = 'referenced' }
-            if (($deps.PSObject.Properties.Name -contains 'dsh-pet') -and $deps.'dsh-pet' -match '^(file:|link:)' -and $deps.'dsh-pet' -match 'dsh-pet-unified-memory') { $petRef = 'referenced' }
+            if ($deps.PSObject.Properties.Name -contains 'dsh-dafeiyu-memory') {
+                if (Test-LocalReference $deps.'dsh-dafeiyu-memory' $repo 'dsh-dafeiyu-memory' $package.version ([IO.Path]::GetDirectoryName($profile))) { $coreRef = 'pass' }
+                elseif ($RequireActivated) { $coreRef = 'fail' }
+            }
+            if ($deps.PSObject.Properties.Name -contains 'dsh-pet') {
+                if (Test-LocalReference $deps.'dsh-pet' $petPackageRoot 'dsh-pet' '0.3.8' ([IO.Path]::GetDirectoryName($profile))) { $petRef = 'pass' }
+                elseif ($RequireActivated) { $petRef = 'fail' }
+            }
         }
     }
     Add-Check 'CORE_ACTIVATION' $coreRef ([bool]$RequireActivated) 'PROFILE_REFERENCE_ONLY_RUNTIME_UNVERIFIED'

@@ -180,7 +180,7 @@ test('service exposes importExisting with default DSH-home paths and scan only, 
 });
 
 test('dryRun deduplicates stable message IDs across files and honors purge tombstones',async t=>{
-  const c=await setup(t);const record={id:'stable-message',t:NOW,chatId:'private:fixture',who:'fixture',text:'stable fixture'};
+  const c=await setup(t);const record={id:'stable-message',t:NOW,chatId:'private:fixture',who:'fixture',uid:'fixture',text:'stable fixture'};
   await put(join(c.sources.aurabot,'chatlog','a.jsonl'),JSON.stringify(record));
   await put(join(c.sources.aurabot,'chatlog','b.jsonl'),JSON.stringify(record));
   let report=await c.manager.importExisting({sources:c.sources,dryRun:true});assert.equal(source(report,'aurabot').planned,1);assert.equal(source(report,'aurabot').skipped,1);

@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, lstatSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { SCHEMA_VERSION } from '../src/storage/migrations.js';
+import { SCHEMA_VERSION, validateCurrentSchema } from '../src/storage/migrations.js';
 // Offline inspection only. An active WAL is checked by header instead of creating SQLite sidecars.
 export function inspectDatabase(path) {
   if (!existsSync(path)) return { status: 'pending', code: 'DATABASE_NOT_CREATED' };
@@ -16,6 +16,7 @@ export function inspectDatabase(path) {
   const db = new DatabaseSync(':memory:');
   try {
     db.deserialize(bytes); db.exec('PRAGMA query_only=ON');
+    if (!validateCurrentSchema(db)) return { status: 'fail', code: 'DATABASE_SCHEMA_INVALID' };
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') return { status: 'fail', code: 'DATABASE_INTEGRITY_FAILED' };
     const counts = {};
     for (const [key, table] of [['events', 'memory_events'], ['items', 'memory_items'], ['diary', 'diary_entries'], ['jobs', 'review_jobs']]) {

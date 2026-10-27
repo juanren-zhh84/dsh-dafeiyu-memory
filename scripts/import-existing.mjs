@@ -1,11 +1,11 @@
-import { lstatSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, existsSync, copyFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { isAbsolute, resolve, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { MemoryDatabase } from '../src/storage/database.js';
-import { SCHEMA_VERSION } from '../src/storage/migrations.js';
+import { validateCurrentSchema } from '../src/storage/migrations.js';
 import { resolveConfig } from '../src/config.js';
 import { resolveMemoryPaths } from '../src/paths.js';
 import { ImportManager } from '../src/importers/index.js';
@@ -49,14 +49,12 @@ function validateExisting(paths) {
   const allowed = new Set(['memory.sqlite', 'memory.sqlite-wal', 'memory.sqlite-shm', 'backups', 'spool', 'reports']);
   if (readdirSync(paths.root).some(x => !allowed.has(x)) || !existsSync(paths.database)) fail('UNKNOWN_TARGET');
   if (existsSync(`${paths.database}-wal`) || existsSync(`${paths.database}-shm`)) fail('TARGET_BUSY');
-  const db = offlineCopy(paths.database);
+  let db;
   try {
-    if (db.prepare('PRAGMA user_version').get().user_version !== SCHEMA_VERSION
-      || db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') fail('UNKNOWN_TARGET');
-    for (const table of ['memory_events', 'memory_items', 'diary_entries', 'review_jobs', 'import_ledger', 'purge_ledger', 'schema_meta']) {
-      if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(table)) fail('UNKNOWN_TARGET');
-    }
-  } finally { db.close(); }
+    db = offlineCopy(paths.database);
+    if (!validateCurrentSchema(db)) fail('UNKNOWN_TARGET');
+  } catch { fail('UNKNOWN_TARGET'); }
+  finally { db?.close(); }
   return true;
 }
 
@@ -79,27 +77,86 @@ export async function importCore({ dshHome, apply = false }) {
   const targetHash = existing ? fingerprint(readFileSync(paths.database)) : null;
   const before = snapshotCoreSources(home), config = resolveConfig();
   const sources = { aurabot: join(home, 'plugins-data/aurabot'), pet: join(home, 'dsh-pet/memory.json') };
-  let scratch, database, reader;
+  let scratch, stageHome, database, reader;
+  const sourceGate = () => {
+    if (JSON.stringify(snapshotCoreSources(home)) !== JSON.stringify(before)) fail('SOURCE_CHANGED');
+  };
+  const targetGate = () => {
+    if (validateExisting(paths) !== existing || (existing && fingerprint(readFileSync(paths.database)) !== targetHash)) fail('TARGET_CHANGED');
+  };
   try {
     // Planning reads an existing target without migration/checkpoint or opens a disposable new database.
     if (existing) { reader = offlineCopy(paths.database); database = { read: fn => fn(reader) }; }
     else { scratch = await mkdtemp(join(tmpdir(), 'memory-import-plan-')); database = await MemoryDatabase.open(join(scratch, 'plan.sqlite')); }
     const plan = await new ImportManager({ database, paths, config }).importExisting({ dryRun: true, sources });
     if (!plan.ok) return { ...plan, code: 'IMPORT_PREFLIGHT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
-    if (JSON.stringify(snapshotCoreSources(home)) !== JSON.stringify(before)) fail('SOURCE_CHANGED');
+    sourceGate();
     if (existing && fingerprint(readFileSync(paths.database)) !== targetHash) fail('TARGET_CHANGED');
     if (!apply) return { ...plan, code: 'DRY_RUN_OK', backupTarget: 'CORE_IMPORT_SOURCES' };
     if (reader) { reader.close(); reader = undefined; database = undefined; }
     else { await database.close(); database = undefined; }
-    // Recheck immediately before creating/opening the real target. Unknown state is never overwritten.
-    if (validateExisting(paths) !== existing || (existing && fingerprint(readFileSync(paths.database)) !== targetHash)) fail('TARGET_CHANGED');
-    database = await MemoryDatabase.open(paths.database);
-    const report = await new ImportManager({ database, paths, config }).importExisting({ dryRun: false, sources });
-    if (JSON.stringify(snapshotCoreSources(home)) !== JSON.stringify(before)) fail('SOURCE_CHANGED');
+    // All parsing, backup and database writes happen in a same-volume isolated staging directory.
+    // Neither a changed source nor a failed batch can leave records in the real target.
+    targetGate(); sourceGate();
+    stageHome = await mkdtemp(join(home, '.dafeiyu-import-'));
+    const stagePaths = resolveMemoryPaths({ dshHome: stageHome });
+    const stageSources = { aurabot: join(stageHome, 'plugins-data/aurabot'), pet: join(stageHome, 'dsh-pet/memory.json') };
+    const copySource = (from, to) => {
+      if (!existsSync(from)) return;
+      noLinks(from); const bytes = readFileSync(from);
+      mkdirSync(dirname(to), { recursive: true }); writeFileSync(to, bytes, { mode: 0o600 });
+    };
+    for (const name of ['memories.json', 'diary.json']) copySource(join(sources.aurabot, name), join(stageSources.aurabot, name));
+    if (existsSync(join(sources.aurabot, 'chatlog'))) for (const name of readdirSync(join(sources.aurabot, 'chatlog')).filter(x => x.endsWith('.jsonl'))) {
+      copySource(join(sources.aurabot, 'chatlog', name), join(stageSources.aurabot, 'chatlog', name));
+    }
+    copySource(sources.pet, stageSources.pet);
+    // The actual importer sees only this exact preflight file set and these exact bytes.
+    if (JSON.stringify(snapshotCoreSources(stageHome)) !== JSON.stringify(before)) fail('SOURCE_CHANGED');
+    sourceGate();
+    if (existing) { mkdirSync(stagePaths.root); copyFileSync(paths.database, stagePaths.database); }
+    database = await MemoryDatabase.open(stagePaths.database);
+    sourceGate(); targetGate();
+    const report = await new ImportManager({ database, paths: stagePaths, config }).importExisting({ dryRun: false, sources: stageSources });
+    sourceGate();
+    await database.close(); database = undefined;
+    if (!report.ok) return { ...report, code: 'IMPORT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
+    if (report.reportCode) fail('IMPORT_FAILED');
+    sourceGate(); targetGate();
+    if (existing) {
+      // Publish verified source backups first. The database remains byte-for-byte old until
+      // the last synchronous gates and one same-volume atomic file rename; no await occurs between.
+      for (const relative of ['backups/import-sources']) {
+        const from = join(stagePaths.root, relative), to = join(paths.root, relative);
+        if (!existsSync(from)) continue;
+        noLinks(to); mkdirSync(to, { recursive: true });
+        for (const name of readdirSync(from)) {
+          const destination = join(to, name); if (existsSync(destination)) fail('TARGET_CHANGED');
+          renameSync(join(from, name), destination);
+        }
+      }
+      targetGate(); sourceGate();
+      renameSync(stagePaths.database, paths.database);
+      // A success report is published only after its database. Reporting failure cannot undo a commit.
+      try {
+        if (existsSync(stagePaths.reports)) {
+          noLinks(paths.reports); mkdirSync(paths.reports, { recursive: true });
+          for (const name of readdirSync(stagePaths.reports)) {
+            const destination = join(paths.reports, name); if (existsSync(destination)) throw Error();
+            renameSync(join(stagePaths.reports, name), destination);
+          }
+        }
+      } catch { report.reportCode = 'REPORT_FAILED'; }
+    } else {
+      targetGate(); sourceGate();
+      renameSync(stagePaths.root, paths.root);
+    }
+    // Publication is the commit point. Later source activity is a new state, never a failed import.
     return { ...report, code: report.ok ? 'IMPORT_OK' : 'IMPORT_FAILED', backupTarget: 'CORE_IMPORT_SOURCES' };
   } finally {
     if (reader) reader.close(); else await database?.close();
     if (scratch) await rm(scratch, { recursive: true, force: true });
+    if (stageHome) await rm(stageHome, { recursive: true, force: true });
   }
 }
 
