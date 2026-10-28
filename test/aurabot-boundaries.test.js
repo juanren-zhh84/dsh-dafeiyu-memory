@@ -287,3 +287,24 @@ test('a forwarding entry making two real sends records both deepest sends instea
   assert.deepEqual(first.events.map(e => e.sourceKey), second.events.map(e => e.sourceKey));
   first.dispose(); second.dispose(); assert.equal(onebot.call, forwarding);
 });
+
+for (const withId of [true, false]) for (const count of [1, 2]) test(`non-send normalization preserves deepest identity through all send ancestors (id=${withId}, listeners=${count})`, async t => {
+  const wire = [], onebot = { async call(action, params) { wire.push({ action, params }); return withId ? { message_id: 800 } : {}; } };
+  const first = fixture(t, { onebot }), terminal = onebot.call;
+  const normalizer = function (action, params) {
+    if (action === 'send_private_msg') return onebot.call('send_msg', { ...params, message: params.message + ':归一化' });
+    return terminal.call(this, 'send_private_msg', { ...params, message: params.message + ':最终' });
+  };
+  onebot.call = normalizer; const second = fixture(t, { onebot });
+  if (count === 1) first.dispose();
+  await onebot.call('send_private_msg', { user_id: 300, message: '初稿' });
+  await first.tick(); await second.tick(); assert.equal(wire.length, 1);
+  for (const f of count === 1 ? [second] : [first, second]) {
+    assert.equal(f.events.length, 1, 'one real send must notify each listener once');
+    assert.equal(f.events[0].contentText, wire[0].params.message);
+    assert.equal(f.events[0].contentText, '初稿:归一化:最终');
+  }
+  if (count === 2) assert.equal(first.events[0].sourceKey, second.events[0].sourceKey);
+  else assert.equal(first.events.length, 0);
+  first.dispose(); second.dispose(); assert.equal(onebot.call, normalizer);
+});

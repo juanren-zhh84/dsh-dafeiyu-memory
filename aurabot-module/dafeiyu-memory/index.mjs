@@ -87,8 +87,12 @@ function observeSuccessfulSends(onebot, listener) {
       const parent = state.calls.getStore();
       if (!state.listeners.size && !parent) return Reflect.apply(original, this, args);
       const isSend = args[0] === 'send_group_msg' || args[0] === 'send_private_msg';
-      if (parent && isSend) parent.children++;
-      const call = { children: 0 };
+      if (isSend) for (let ancestor = parent; ancestor; ancestor = ancestor.parent) {
+        if (ancestor.isSend) ancestor.children++;
+      }
+      // Keep non-send normalization nodes in the chain: they do not break the
+      // relationship between this terminal send and earlier send ancestors.
+      const call = { children: 0, parent, isSend };
       let snapshot;
       try {
         const [action, params] = args;
