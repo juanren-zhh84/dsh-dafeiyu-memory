@@ -75,9 +75,13 @@ test('local verifier rejects a forged prepared state with no canonical patched f
 test('local verifier accepts exactly tested DSH rc.2 and rc.3 versions without partial prerelease matches', t => {
   const home = fixture(t);
   const quote = value => `'${value.replaceAll("'", "''")}'`;
-  for (const [version, expected] of [['0.2.1-rc.2', 'pass'], ['0.2.1-rc.3', 'pass'],
-    ['0.2.1-rc.20', 'fail'], ['0.2.1-rc.4', 'fail'], ['0.2.2', 'fail']]) {
-    const command = `function global:dsh { 'DeepSeek Harness ${version}' }; & ${quote(verifier)} -DshHome ${quote(home)}`;
+  for (const [output, version, expected] of [
+    ['0.2.1-rc.2', '0.2.1-rc.2', 'pass'], ['0.2.1-rc.3', '0.2.1-rc.3', 'pass'],
+    ['DeepSeek Harness 0.2.1-rc.2', '0.2.1-rc.2', 'pass'], ['dsh v0.2.1-rc.3', '0.2.1-rc.3', 'pass'],
+    ...['0.2.1-rc.20', '0.2.1-rc.4', '0.2.2', '0.2.1-rc.3.1', '0.2.1-rc.3beta',
+      '0.2.1-rc.3+build.1', '0.2.1-rc.3-tail', '0.2.1-rc.3+'].map(version => [`DeepSeek Harness ${version}`, version, 'fail']),
+    ['unavailable', 'UNKNOWN', 'fail']]) {
+    const command = `function global:dsh { ${quote(output)} }; & ${quote(verifier)} -DshHome ${quote(home)}`;
     const result = spawnSync('pwsh', ['-NoProfile', '-Command', command], { encoding: 'utf8' });
     const check = JSON.parse(result.stdout).checks.find(row => row.code === 'DSH_VERSION');
     assert.equal(check.status, expected, version); assert.equal(check.details, version);

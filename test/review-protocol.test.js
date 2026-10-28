@@ -9,6 +9,7 @@ import { createFakeContext } from './helpers/fake-context.js';
 import { createTempHome } from './helpers/temp-home.js';
 import { eventInput } from './fixtures/events.js';
 import { readFileSync } from 'node:fs';
+import semver from 'semver';
 
 const candidates = () => [1, 2, 3].map((n) => ({ id: `e${n}`, version: 1, content: `private content ${n}`, visibility: 'owner-private' }));
 const request = (mode = 'short-term') => snapshotReviewRequest({ mode, candidates: candidates() });
@@ -182,7 +183,15 @@ test('plugin injects model services and chat remains usable after a review failu
 test('DSH runtime compatibility covers rc.2 and rc.3 while consumed development packages stay pinned', () => {
   const metadata = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const locked = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8')).packages[''];
-  const range = '>=0.2.1-rc.2 <0.2.2';
+  const range = '0.2.1-rc.2 || 0.2.1-rc.3';
+  const compatibility = [['0.2.1-rc.2', true], ['0.2.1-rc.3', true], ['0.2.1-rc.4', false],
+    ['0.2.1', false], ['0.2.2-rc.1', false]];
+  for (const [version, expected] of compatibility) {
+    assert.equal(semver.satisfies(version, metadata.engines.dsh, { includePrerelease: true }), expected, `engine ${version}`);
+    for (const [name, value] of Object.entries(metadata.peerDependencies).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))) {
+      assert.equal(semver.satisfies(version, value, { includePrerelease: true }), expected, `${name} ${version}`);
+    }
+  }
   assert.equal(metadata.engines.dsh, range);
   const peers = Object.entries(metadata.peerDependencies).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'));
   assert.equal(peers.length, 4);

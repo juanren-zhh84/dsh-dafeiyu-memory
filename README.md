@@ -4,7 +4,7 @@
 
 目标环境：Windows、PowerShell 7、Node.js ≥24.22.0（本机验证 24.22.1）、DSH 0.2.1-rc.2 / rc.3、Aurabot 1.0.5 / 扩展 API v1、dsh-pet 0.3.8。连接器沿用既有 1.0.2 接口设计；1.0.2 未在本轮重新实测，当前真实宿主回归以 1.0.5 为准。抖音连接器**未安装/可选**，不属于核心失败条件；下列命令只选择 QQ 和桌宠，绝不探测抖音来源。
 
-本轮 Desktop 实装目标使用其内置 CLI `D:\DSH\resources\runtime\cli\bin\dsh.cmd`，已确认运行时为 0.2.1-rc.3。清单通过 `engines.dsh` 和四项 DSH peer 的 `>=0.2.1-rc.2 <0.2.2` 声明兼容范围，开发依赖仍锁定 rc.2；不使用 `allow-version` 绕过门禁。实际安装和激活由复审后执行，兼容声明本身不表示安装已完成。
+本轮 Desktop 实装目标使用其内置 CLI `D:\DSH\resources\runtime\cli\bin\dsh.cmd`，已确认运行时为 0.2.1-rc.3。清单通过 `engines.dsh` 和四项 DSH peer 的 `0.2.1-rc.2 || 0.2.1-rc.3` 仅声明这两个已验证版本兼容，其他预发布版和正式版均不在范围内，开发依赖仍锁定 rc.2；不使用 `allow-version` 绕过门禁。实际安装和激活由复审后执行，兼容声明本身不表示安装已完成。
 
 ## 文件与数据
 

@@ -40,7 +40,8 @@ try {
     $nodeVersion = (& node --version 2>$null | Out-String).Trim()
     Add-Check 'NODE_VERSION' $(if ($nodeVersion -match '^v(\d+)\.(\d+)\.(\d+)$' -and [version]$nodeVersion.TrimStart('v') -ge [version]'24.22.0') { 'pass' } else { 'fail' }) $true $nodeVersion
     $dshVersion = (& dsh --version 2>$null | Out-String).Trim()
-    $dshVersionNumber = if ($dshVersion -match '(\d+\.\d+\.\d+(?:-rc\.\d+)?)') { $Matches[1] } else { 'UNKNOWN' }
+    $dshVersionMatch = [regex]::Match($dshVersion, '(?<![0-9A-Za-z.+-])[vV]?(?<version>[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)(?![0-9A-Za-z.+-])')
+    $dshVersionNumber = if ($dshVersionMatch.Success) { $dshVersionMatch.Groups['version'].Value } else { 'UNKNOWN' }
     Add-Check 'DSH_VERSION' $(if ($dshVersionNumber -cin @('0.2.1-rc.2', '0.2.1-rc.3')) { 'pass' } else { 'fail' }) $true $dshVersionNumber
     Add-Check 'PLUGIN_VERSION' 'pass' $true $package.version
     $root = Join-Path $DshHome 'dafeiyu-memory'; Assert-NoLinks $root
