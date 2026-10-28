@@ -174,3 +174,64 @@ test('malformed OneBot identifiers never create events or stringify caller objec
   }
   await f.tick(); assert.equal(f.events.length, 0); assert.equal(touched, 0);
 });
+
+test('inbound snapshots ignore unrelated raw getters and nested inherited/accessor fields while recording own data', async t => {
+  const f = fixture(t); let reads = 0;
+  const unsafe = () => { reads++; throw Error('unrelated accessor'); };
+  const event = message();
+  Object.defineProperty(event, 'unrelated', { enumerable: true, get: unsafe });
+  const sender = Object.create(Object.defineProperty({}, 'nickname', { get: unsafe }));
+  Object.defineProperty(sender, 'unrelated', { enumerable: true, get: unsafe }); event.sender = sender;
+  const inheritedSegment = Object.create(Object.defineProperty({}, 'type', { get: unsafe }));
+  const accessorSegment = { type: 'text', data: Object.defineProperty({}, 'text', { get: unsafe }) };
+  event.message = [{ type: 'text', data: { text: '正常' } }, { type: 'image', get data() { return unsafe(); } },
+    inheritedSegment, accessorSegment];
+  Object.defineProperty(event.message, 'map', { get: unsafe });
+  f.emit('onebot', event); await f.tick();
+  assert.equal(reads, 0); assert.equal(f.events.length, 1); assert.equal(f.events[0].contentText, '正常[图片]');
+  assert.equal(f.events[0].actorName, '300');
+});
+
+test('outbound observation never adds getter reads or changes values, errors, receiver and results', async t => {
+  for (const field of ['message', 'user_id', 'type', 'data', 'text']) {
+    let reads = 0, receiver, wire;
+    const first = field === 'user_id' ? 300 : field === 'type' ? 'text' : field === 'data' ? { text: 'wire first' } : 'wire first';
+    const second = field === 'user_id' ? 301 : field === 'type' ? 'image' : field === 'data' ? { text: 'wire second' } : 'wire second';
+    const params = { user_id: 300, message: [{ type: 'text', data: { text: 'plain' } }] };
+    const object = field === 'message' || field === 'user_id' ? params : field === 'text' ? params.message[0].data : params.message[0];
+    Object.defineProperty(object, field, { get() { reads++; return reads === 1 ? first : second; } });
+    const result = { message_id: 123 };
+    const onebot = { async call(action, value) { receiver = this;
+      wire = field === 'message' ? value.message : field === 'user_id' ? value.user_id
+        : field === 'type' ? value.message[0].type : field === 'data' ? value.message[0].data : value.message[0].data.text;
+      return result;
+    } };
+    const f = fixture(t, { onebot });
+    assert.equal(await onebot.call('send_private_msg', params), result); await f.tick();
+    assert.equal(reads, 1, field); assert.equal(wire, first, field); assert.equal(receiver, onebot);
+    assert.equal(f.events.length, 0, field); f.dispose();
+  }
+  let reads = 0; const failure = Error('actual getter failure');
+  const params = { user_id: 300, get message() { reads++; throw failure; } };
+  const onebot = { async call(action, value) { return value.message; } }, f = fixture(t, { onebot });
+  await assert.rejects(onebot.call('send_private_msg', params), error => error === failure);
+  await f.tick(); assert.equal(reads, 1); assert.equal(f.events.length, 0);
+});
+
+for (const withId of [true, false]) test(`forwarding rewrite shares one boundary across replacement and reload (message_id=${withId})`, async t => {
+  const wire = [], onebot = { async call(action, params) { wire.push(params.message); return withId ? { message_id: wire.length } : {}; } };
+  const first = fixture(t, { onebot }), boundary = onebot.call;
+  const forwarding = function (action, params, ...rest) { return boundary.call(this, action, { ...params, message: params.message + ':最终' }, ...rest); };
+  onebot.call = forwarding;
+  const second = fixture(t, { onebot });
+  await onebot.call('send_private_msg', { user_id: 300, message: '初稿' }); await first.tick(); await second.tick();
+  assert.equal(first.events.length, 1); assert.equal(second.events.length, 1);
+  assert.equal(second.events[0].contentText, wire[0]); assert.equal(first.events[0].sourceKey, second.events[0].sourceKey);
+  assert.equal(onebot.call, forwarding);
+  first.dispose(); second.dispose(); assert.equal(onebot.call, forwarding);
+  const reload = await import('../aurabot-module/dafeiyu-memory/index.mjs?forwarding-reload');
+  const reloaded = fixture(t, { onebot, setup: reload.setupConnector }); assert.equal(onebot.call, forwarding);
+  await onebot.call('send_private_msg', { user_id: 300, message: '重载初稿' }); await reloaded.tick();
+  assert.equal(reloaded.events.length, 1); assert.equal(reloaded.events[0].contentText, wire[1]);
+  reloaded.dispose(); assert.equal(onebot.call, forwarding);
+});

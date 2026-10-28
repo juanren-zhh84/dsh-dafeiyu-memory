@@ -8,45 +8,94 @@ const SEND_LISTENERS = Symbol.for('dafeiyu-memory.onebot-send-listeners.v1');
 const placeholders = { image: '[图片]', record: '[语音]', face: '[表情]', mface: '[表情包]',
   video: '[视频]', file: '[文件]', forward: '[合并转发]', json: '[卡片消息]', xml: '[卡片消息]',
   at: '[@]', poke: '[戳一戳]', reply: '' };
+function ownValue(object, key) {
+  if (!object || typeof object !== 'object') return;
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+}
 function sentText(message) {
   if (typeof message === 'string') return message.replace(/\[CQ:(\w+)[^\]]*\]/g, (_, kind) => placeholders[kind] ?? '[消息]');
-  if (!Array.isArray(message)) return '';
+  if (!Array.isArray(message)) return;
   // Read text only. Media metadata, paths, buffers and quoted content are never inspected.
-  return message.map(segment => segment?.type === 'text' ? text(segment.data?.text, 16000)
-    : placeholders[segment?.type] ?? '[消息]').join('').slice(0, 16000);
+  let content = '';
+  for (let index = 0; index < ownValue(message, 'length'); index++) {
+    const segment = ownValue(message, String(index)), kind = ownValue(segment, 'type');
+    if (typeof kind !== 'string') return;
+    if (kind === 'text') {
+      const value = ownValue(ownValue(segment, 'data'), 'text');
+      if (typeof value !== 'string') return;
+      content += value;
+    } else content += Object.hasOwn(placeholders, kind) ? placeholders[kind] : '[消息]';
+  }
+  return content.slice(0, 16000);
 }
 function safeInboundMessage(message) {
   if (typeof message === 'string') return sentText(message);
   if (!Array.isArray(message)) return;
-  return message.map(segment => {
-    const kind = segment?.type;
-    if (kind === 'text') return { type: 'text', data: { text: text(segment.data?.text, 16000) } };
-    if (kind === 'at') return { type: 'at', data: { qq: segment.data?.qq, name: segment.data?.name } };
+  const safe = [];
+  for (let index = 0; index < ownValue(message, 'length'); index++) {
+    const segment = ownValue(message, String(index)), kind = ownValue(segment, 'type');
+    if (typeof kind !== 'string') continue;
+    if (kind === 'text') {
+      const content = ownValue(ownValue(segment, 'data'), 'text');
+      if (typeof content === 'string') safe.push({ type: 'text', data: { text: text(content, 16000) } });
+      continue;
+    }
+    if (kind === 'at') {
+      const data = ownValue(segment, 'data'), qq = ownValue(data, 'qq'), name = ownValue(data, 'name');
+      if (validId(qq)) safe.push({ type: 'at', data: { qq, name: text(name, 200) } });
+      continue;
+    }
     // Keep quoting metadata out of memory; no lookup or quoted body is needed.
-    return { type: 'text', data: { text: placeholders[kind] ?? '[消息]' } };
-  });
+    safe.push({ type: 'text', data: { text: Object.hasOwn(placeholders, kind) ? placeholders[kind] : '[消息]' } });
+  }
+  return safe;
+}
+function inboundSnapshot(event) {
+  const safe = Object.create(null);
+  for (const key of ['post_type', 'message_type', 'user_id', 'group_id', 'message_id', 'self_id', 'time']) safe[key] = ownValue(event, key);
+  if (safe.post_type !== 'message' || !['private', 'group'].includes(safe.message_type)) return;
+  const sender = ownValue(event, 'sender');
+  safe.sender = Object.create(null);
+  for (const key of ['card', 'nickname', 'role']) {
+    const value = ownValue(sender, key);
+    if (typeof value === 'string') safe.sender[key] = value;
+  }
+  const senderId = ownValue(sender, 'user_id');
+  if (validId(senderId)) safe.sender.user_id = senderId;
+  if (!validId(safe.user_id ?? senderId)
+    || (safe.message_type === 'group' && !validId(safe.group_id))
+    || (safe.message_id !== undefined && safe.message_id !== null && safe.message_id !== '' && !validId(safe.message_id))) return;
+  // Never pass caller objects or fields the parser does not need.
+  if (!validId(safe.self_id)) safe.self_id = undefined;
+  safe.message = safeInboundMessage(ownValue(event, 'message'));
+  return safe.message === undefined ? undefined : safe;
 }
 function observeSuccessfulSends(onebot, listener) {
   if (!onebot || typeof onebot.call !== 'function') return () => {};
-  let state = onebot.call[SEND_LISTENERS];
+  // The gateway owns the registry: a later forwarding function may hide the
+  // boundary wrapper while still calling it with its final, rewritten params.
+  let state = ownValue(onebot, SEND_LISTENERS);
   if (!state || state.onebot !== onebot) {
     const original = onebot.call;
     state = { onebot, listeners: new Set(), original };
     const wrapper = async function (...args) {
+      if (!state.listeners.size) return Reflect.apply(original, this, args);
       let snapshot;
       try {
         const [action, params] = args;
         const kind = action === 'send_group_msg' ? 'group' : action === 'send_private_msg' ? 'private' : undefined;
-        const id = kind && params?.[kind === 'group' ? 'group_id' : 'user_id'];
-        if (kind && (typeof id === 'string' || Number.isSafeInteger(id)) && String(id).trim()) {
-          snapshot = { kind: 'out', chatId: `${kind}:${id}`, text: sentText(params.message),
+        const id = kind && ownValue(params, kind === 'group' ? 'group_id' : 'user_id');
+        const content = kind && validId(id) ? sentText(ownValue(params, 'message')) : undefined;
+        if (typeof content === 'string') {
+          snapshot = { kind: 'out', chatId: `${kind}:${id}`, text: content,
             sourceKey: `aurabot:out:send:${randomUUID()}` };
         }
       } catch { /* Observation must never alter a gateway call. */ }
       const result = await Reflect.apply(original, this, args);
       if (snapshot) {
         try {
-          const id = result?.message_id;
+          const id = ownValue(result, 'message_id');
           if ((typeof id === 'string' || Number.isSafeInteger(id)) && String(id).trim() && String(id).length <= 480) {
             snapshot.sourceKey = `aurabot:out:onebot:${id}`;
           }
@@ -56,14 +105,17 @@ function observeSuccessfulSends(onebot, listener) {
       }
       return result;
     };
-    Object.defineProperty(wrapper, SEND_LISTENERS, { value: state });
     state.wrapper = wrapper;
+    Object.defineProperty(onebot, SEND_LISTENERS, { value: state, configurable: true });
     onebot.call = wrapper;
   }
   state.listeners.add(listener);
   return () => {
     state.listeners.delete(listener);
-    if (!state.listeners.size && onebot.call === state.wrapper) onebot.call = state.original;
+    if (!state.listeners.size && onebot.call === state.wrapper) {
+      onebot.call = state.original;
+      if (ownValue(onebot, SEND_LISTENERS) === state) delete onebot[SEND_LISTENERS];
+    }
   };
 }
 
@@ -135,17 +187,13 @@ export function setupConnector(api, { clock = Date } = {}) {
     offs.push(api.on('onebot', (event) => {
       if (disposed) return;
       try {
-        if (event?.post_type !== 'message' || !['private', 'group'].includes(event.message_type)) return;
-        if (!validId(event.user_id ?? event.sender?.user_id)
-          || (event.message_type === 'group' && !validId(event.group_id))
-          || (event.message_id !== undefined && event.message_id !== null && event.message_id !== '' && !validId(event.message_id))) return;
-        const cfg = api.config(), self = String(event.self_id || api.core?.hub?.selfId || cfg.botQQ || '');
-        const message = safeInboundMessage(event.message);
-        if (message === undefined) return;
-        const parsed = parseMessageEvent({ ...event, message }, self);
+        const snapshot = inboundSnapshot(event);
+        if (!snapshot) return;
+        const cfg = api.config(), self = String(snapshot.self_id || api.core?.hub?.selfId || cfg.botQQ || '');
+        const parsed = parseMessageEvent(snapshot, self);
         if (!parsed.userId || (parsed.kind === 'group' && !parsed.groupId) || parsed.userId === self) return;
         if (checkAllowed(cfg, parsed).allowed !== true) return;
-        const dto = capture({ ...parsed, raw: { time: event.time } }, false);
+        const dto = capture({ ...parsed, raw: { time: snapshot.time } }, false);
         if (!dto) return;
         // Bound the per-chat query cache; this is the latest input, not another history.
         latestText.delete(dto.conversationKey); latestText.set(dto.conversationKey, dto.contentText);
