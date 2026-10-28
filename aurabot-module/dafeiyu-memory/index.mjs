@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { ModuleSpool, freezeEvent } from './spool.mjs';
 
 const text = (value, limit = 512) => typeof value === 'string' ? value.slice(0, limit) : '';
@@ -73,14 +74,21 @@ function inboundSnapshot(event) {
 }
 function observeSuccessfulSends(onebot, listener) {
   if (!onebot || typeof onebot.call !== 'function') return () => {};
-  // The gateway owns the registry: a later forwarding function may hide the
-  // boundary wrapper while still calling it with its final, rewritten params.
+  // Registry and async ancestry belong to this gateway, including detached
+  // boundaries a third-party forwarder may still call after a later reload.
   let state = ownValue(onebot, SEND_LISTENERS);
   if (!state || state.onebot !== onebot) {
+    state = { onebot, listeners: new Set(), boundaries: new WeakMap(), calls: new AsyncLocalStorage() };
+    Object.defineProperty(onebot, SEND_LISTENERS, { value: state, configurable: true });
+  }
+  if (!state.boundaries.has(onebot.call)) {
     const original = onebot.call;
-    state = { onebot, listeners: new Set(), original };
     const wrapper = async function (...args) {
-      if (!state.listeners.size) return Reflect.apply(original, this, args);
+      const parent = state.calls.getStore();
+      if (!state.listeners.size && !parent) return Reflect.apply(original, this, args);
+      const isSend = args[0] === 'send_group_msg' || args[0] === 'send_private_msg';
+      if (parent && isSend) parent.children++;
+      const call = { children: 0 };
       let snapshot;
       try {
         const [action, params] = args;
@@ -88,14 +96,16 @@ function observeSuccessfulSends(onebot, listener) {
         const id = kind && ownValue(params, kind === 'group' ? 'group_id' : 'user_id');
         const content = kind && validId(id) ? sentText(ownValue(params, 'message')) : undefined;
         if (typeof content === 'string') {
-          snapshot = { kind: 'out', chatId: `${kind}:${id}`, text: content,
-            sourceKey: `aurabot:out:send:${randomUUID()}` };
+          snapshot = { kind: 'out', chatId: `${kind}:${id}`, text: content };
         }
       } catch { /* Observation must never alter a gateway call. */ }
-      const result = await Reflect.apply(original, this, args);
-      if (snapshot) {
+      const result = await state.calls.run(call, () => Reflect.apply(original, this, args));
+      // Nested boundaries are actual deeper sends. Each leaf settles once;
+      // its ancestors cannot publish an earlier version of the same params.
+      if (snapshot && !call.children) {
         try {
           const id = ownValue(result, 'message_id');
+          snapshot.sourceKey = `aurabot:out:send:${randomUUID()}`;
           if ((typeof id === 'string' || Number.isSafeInteger(id)) && String(id).trim() && String(id).length <= 480) {
             snapshot.sourceKey = `aurabot:out:onebot:${id}`;
           }
@@ -105,17 +115,13 @@ function observeSuccessfulSends(onebot, listener) {
       }
       return result;
     };
-    state.wrapper = wrapper;
-    Object.defineProperty(onebot, SEND_LISTENERS, { value: state, configurable: true });
+    state.boundaries.set(wrapper, original);
     onebot.call = wrapper;
   }
   state.listeners.add(listener);
   return () => {
     state.listeners.delete(listener);
-    if (!state.listeners.size && onebot.call === state.wrapper) {
-      onebot.call = state.original;
-      if (ownValue(onebot, SEND_LISTENERS) === state) delete onebot[SEND_LISTENERS];
-    }
+    if (!state.listeners.size) while (state.boundaries.has(onebot.call)) onebot.call = state.boundaries.get(onebot.call);
   };
 }
 

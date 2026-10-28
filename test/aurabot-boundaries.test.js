@@ -227,11 +227,63 @@ for (const withId of [true, false]) test(`forwarding rewrite shares one boundary
   await onebot.call('send_private_msg', { user_id: 300, message: '初稿' }); await first.tick(); await second.tick();
   assert.equal(first.events.length, 1); assert.equal(second.events.length, 1);
   assert.equal(second.events[0].contentText, wire[0]); assert.equal(first.events[0].sourceKey, second.events[0].sourceKey);
-  assert.equal(onebot.call, forwarding);
+  assert.notEqual(onebot.call, forwarding, 'an unproven entry receives an outer boundary');
   first.dispose(); second.dispose(); assert.equal(onebot.call, forwarding);
   const reload = await import('../aurabot-module/dafeiyu-memory/index.mjs?forwarding-reload');
-  const reloaded = fixture(t, { onebot, setup: reload.setupConnector }); assert.equal(onebot.call, forwarding);
+  const reloaded = fixture(t, { onebot, setup: reload.setupConnector }); assert.notEqual(onebot.call, forwarding);
   await onebot.call('send_private_msg', { user_id: 300, message: '重载初稿' }); await reloaded.tick();
   assert.equal(reloaded.events.length, 1); assert.equal(reloaded.events[0].contentText, wire[1]);
   reloaded.dispose(); assert.equal(onebot.call, forwarding);
+});
+
+test('reload observes a completely replaced gateway after forwarding retained an empty registry', async t => {
+  const onebot = { async call() { return {}; } }, first = fixture(t, { onebot }), oldBoundary = onebot.call;
+  const forwarding = function (...args) { return oldBoundary.apply(this, args); };
+  onebot.call = forwarding; first.dispose(); assert.equal(onebot.call, forwarding);
+  const result = { message_id: 700 }, wire = [];
+  const replacement = async function (action, params) { wire.push(params.message); return result; };
+  onebot.call = replacement;
+  const reload = await import('../aurabot-module/dafeiyu-memory/index.mjs?complete-replacement');
+  const active = fixture(t, { onebot, setup: reload.setupConnector });
+  assert.equal(await onebot.call('send_private_msg', { user_id: 300, message: '新网关最终发送' }), result);
+  await active.tick(); assert.equal(active.events.length, 1);
+  assert.equal(active.events[0].contentText, wire[0]); assert.equal(active.events[0].sourceKey, 'aurabot:out:onebot:700');
+  active.dispose(); assert.equal(onebot.call, replacement);
+});
+
+test('nested forwarding boundaries track concurrent deepest successes once and preserve failures in flight', async t => {
+  const waiting = [], failure = Error('synthetic terminal failure');
+  const onebot = { call(action, params) { return new Promise((resolve, reject) => waiting.push({ params, resolve, reject })); } };
+  const first = fixture(t, { onebot }), boundary = onebot.call;
+  const forwarding = async function (action, params) {
+    await Promise.resolve(); return boundary.call(this, action, { ...params, message: params.message + ':最终' });
+  };
+  onebot.call = forwarding;
+  const second = fixture(t, { onebot });
+  const a = onebot.call('send_private_msg', { user_id: 300, message: '并发甲' });
+  const b = onebot.call('send_private_msg', { user_id: 300, message: '并发乙' });
+  const bad = onebot.call('send_private_msg', { user_id: 300, message: '失败' });
+  const rejected = assert.rejects(bad, error => error === failure);
+  await new Promise(setImmediate); assert.equal(waiting.length, 3);
+  first.dispose();
+  waiting[1].resolve({}); waiting[2].reject(failure); waiting[0].resolve({});
+  await Promise.all([a, b, rejected]); await second.tick();
+  assert.equal(first.events.length, 0); assert.equal(second.events.length, 2);
+  assert.deepEqual(new Set(second.events.map(e => e.contentText)), new Set(['并发甲:最终', '并发乙:最终']));
+  assert.equal(new Set(second.events.map(e => e.sourceKey)).size, 2);
+  second.dispose(); assert.equal(onebot.call, forwarding);
+});
+
+test('a forwarding entry making two real sends records both deepest sends instead of the outer invocation', async t => {
+  const onebot = { async call() { return {}; } }, first = fixture(t, { onebot }), boundary = onebot.call;
+  const forwarding = function (action, params) { return Promise.all(['甲', '乙'].map(suffix =>
+    boundary.call(this, action, { ...params, message: params.message + suffix }))); };
+  onebot.call = forwarding; const second = fixture(t, { onebot });
+  await onebot.call('send_private_msg', { user_id: 300, message: '实际发送' }); await first.tick(); await second.tick();
+  for (const f of [first, second]) {
+    assert.deepEqual(f.events.map(e => e.contentText), ['实际发送甲', '实际发送乙']);
+    assert.equal(new Set(f.events.map(e => e.sourceKey)).size, 2);
+  }
+  assert.deepEqual(first.events.map(e => e.sourceKey), second.events.map(e => e.sourceKey));
+  first.dispose(); second.dispose(); assert.equal(onebot.call, forwarding);
 });
