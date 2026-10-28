@@ -179,10 +179,17 @@ test('plugin injects model services and chat remains usable after a review failu
   } finally { await service.dispose(); }
 });
 
-test('consumed model packages are exact required peers and development dependencies', () => {
+test('DSH runtime compatibility covers rc.2 and rc.3 while consumed development packages stay pinned', () => {
   const metadata = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const locked = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8')).packages[''];
+  const range = '>=0.2.1-rc.2 <0.2.2';
+  assert.equal(metadata.engines.dsh, range);
+  const peers = Object.entries(metadata.peerDependencies).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'));
+  assert.equal(peers.length, 4);
+  for (const [name, value] of peers) assert.equal(value, range, name);
+  assert.deepEqual(locked.engines, metadata.engines); assert.deepEqual(locked.peerDependencies, metadata.peerDependencies);
+  assert.deepEqual(locked.devDependencies, metadata.devDependencies);
   for (const name of ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-agent-default-model']) {
-    assert.equal(metadata.peerDependencies[name], '0.2.1-rc.2');
     assert.equal(metadata.devDependencies[name], '0.2.1-rc.2');
     assert.equal(metadata.peerDependenciesMeta?.[name]?.optional, undefined);
   }
