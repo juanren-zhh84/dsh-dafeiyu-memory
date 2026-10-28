@@ -6,7 +6,7 @@
   "main": "./src/index.js",
   "exports": { ".": "./src/index.js", "./client": "./client.js", "./package.json": "./package.json" },
   "files": ["src/", "cordis.patch.yml", "client.js", "README.md", "aurabot-module/", "integrations/dsh-pet/", "scripts/install-aurabot-module.ps1", "scripts/prepare-pet-source.ps1", "scripts/verify-local-install.ps1", "scripts/import-existing.mjs", "scripts/inspect-local-database.mjs"],
-  "engines": { "node": ">=24.22.0", "dsh": "0.2.1-rc.2 || 0.2.1-rc.3" },
+  "engines": { "node": ">=24.21.0", "dsh": "0.2.1-rc.2 || 0.2.1-rc.3" },
   "scripts": { "test": "node --test test/*.test.js" },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",

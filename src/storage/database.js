@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { memoryError } from '../contracts.js';
-import { migrate, queryOne, SCHEMA_VERSION } from './migrations.js';
+import { finalizeStatement, migrate, queryOne, SCHEMA_VERSION } from './migrations.js';
 import { WriteQueue } from './write-queue.js';
 
 const OPEN_ERROR_MESSAGES = Object.freeze({
@@ -174,7 +174,7 @@ export class MemoryDatabase {
       this.#closing = (async () => {
         await this.writeQueue.close();
         try { this.checkpoint(); } finally {
-          for (const statement of this.#statements.values()) statement.close();
+          for (const statement of this.#statements.values()) finalizeStatement(statement);
           this.#statements.clear();
           this.#database.close();
           this.#closed = true;

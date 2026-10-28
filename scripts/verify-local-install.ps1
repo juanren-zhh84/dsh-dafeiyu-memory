@@ -38,7 +38,7 @@ try {
     $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $package = Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json
     $nodeVersion = (& node --version 2>$null | Out-String).Trim()
-    Add-Check 'NODE_VERSION' $(if ($nodeVersion -match '^v(\d+)\.(\d+)\.(\d+)$' -and [version]$nodeVersion.TrimStart('v') -ge [version]'24.22.0') { 'pass' } else { 'fail' }) $true $nodeVersion
+    Add-Check 'NODE_VERSION' $(if ($nodeVersion -match '^v(\d+)\.(\d+)\.(\d+)$' -and [version]$nodeVersion.TrimStart('v') -ge [version]'24.21.0') { 'pass' } else { 'fail' }) $true $nodeVersion
     $dshVersion = (& dsh --version 2>$null | Out-String).Trim()
     $dshVersionMatch = [regex]::Match($dshVersion, '(?<![0-9A-Za-z.+-])[vV]?(?<version>[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)(?![0-9A-Za-z.+-])')
     $dshVersionNumber = if ($dshVersionMatch.Success) { $dshVersionMatch.Groups['version'].Value } else { 'UNKNOWN' }

@@ -4,15 +4,22 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { MemoryDatabase } from '../src/storage/database.js';
-import { migrate } from '../src/storage/migrations.js';
+import { finalizeStatement, migrate } from '../src/storage/migrations.js';
 import { WriteQueue } from '../src/storage/write-queue.js';
 import { createTempHome } from './helpers/temp-home.js';
 
-test('package metadata requires the Node version that supports explicit statement finalization', () => {
+test('package metadata supports the Desktop embedded Node runtime', () => {
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.engines.node, '>=24.22.0');
+  assert.equal(manifest.engines.node, '>=24.21.0');
   assert.equal(lock.packages[''].engines.node, manifest.engines.node);
+});
+
+test('statement finalization closes newer statements and tolerates the Node 24.21 API', () => {
+  let closed = 0;
+  assert.doesNotThrow(() => finalizeStatement({}));
+  finalizeStatement({ close() { closed++; } });
+  assert.equal(closed, 1);
 });
 
 async function openDatabase(t) {
@@ -240,7 +247,7 @@ test('automatic iterator cleanup failure rolls back instead of committing and th
   const prototype = Object.getPrototypeOf(iterator);
   const nativeReturn = prototype.return;
   iterator.return();
-  statement.close();
+  finalizeStatement(statement);
   raw.close();
   // Inject the otherwise exceptional native reset failure after releasing its resources.
   t.mock.method(prototype, 'return', function (...args) {

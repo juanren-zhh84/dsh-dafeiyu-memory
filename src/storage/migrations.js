@@ -10,6 +10,12 @@ export const MIGRATIONS = Object.freeze([
 ]);
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
+// StatementSync.close() was added after the Node 24.21 runtime embedded in DSH.
+// Older runtimes finalize remaining statements when DatabaseSync.close() runs.
+export function finalizeStatement(statement) {
+  if (typeof statement.close === 'function') statement.close();
+}
+
 /** Validate against a fresh database produced by the same canonical migrations, never a second schema list. */
 export function validateCurrentSchema(database) {
   const expected = new DatabaseSync(':memory:');
@@ -31,7 +37,7 @@ export function validateCurrentSchema(database) {
 /** One-shot queries also finalize their statements; no handles escape migration setup. */
 export function queryOne(database, sql) {
   const statement = database.prepare(sql);
-  try { return statement.get(); } finally { statement.close(); }
+  try { return statement.get(); } finally { finalizeStatement(statement); }
 }
 
 /** Caller must finish the pre-upgrade backup before entering this synchronous function. */
@@ -57,7 +63,7 @@ export function migrate(database, migrations = MIGRATIONS) {
       metadata.run('schema_version', String(target));
       metadata.run('migration_state', 'ready');
       metadata.run('migrated_at', String(Date.now()));
-    } finally { metadata.close(); }
+    } finally { finalizeStatement(metadata); }
     database.exec('COMMIT');
   } catch (error) {
     database.exec('ROLLBACK');
