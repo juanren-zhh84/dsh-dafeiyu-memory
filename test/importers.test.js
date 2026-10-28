@@ -11,6 +11,9 @@ import { resolveMemoryPaths } from '../src/paths.js';
 import { resolveConfig } from '../src/config.js';
 import { apply } from '../src/index.js';
 import { createFakeContext } from './helpers/fake-context.js';
+import { MemoryRepository } from '../src/memory/repository.js';
+import { BackupManager } from '../src/maintenance/backup.js';
+import { PurgeManager } from '../src/maintenance/purge.js';
 const { ImportManager } = await import('../src/importers/index.js').catch(() => ({}));
 const NOW = Date.UTC(2026, 9, 27), DAY = 86400000;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -24,6 +27,37 @@ async function setup(t, overrides = {}) {
   const rows = table => database.read(db => db.prepare(`SELECT * FROM ${table}`).all());
   return { home, paths, database, sources, manager, rows };
 }
+
+test('stable QQ ids deduplicate both import/live orders and reject cross-path replay after purge', async t => {
+  for (const direction of ['incoming', 'outgoing']) {
+  for (const first of ['import', 'live']) {
+    const c = await setup(t), repository = new MemoryRepository({ database: c.database, clock: { now: () => NOW } });
+    const row = { t: NOW, chatId: 'group:synthetic', who: direction === 'outgoing' ? 'bot' : 'fixture',
+      ...(direction === 'incoming' ? { uid: 'synthetic' } : {}), text: 'same message', messageId: 'stable-qq-id' };
+    const sourceKey = direction === 'outgoing' ? `aurabot:out:onebot:${row.messageId}` : row.messageId;
+    await put(join(c.sources.aurabot, 'chatlog', 'stable.jsonl'), JSON.stringify(row));
+    const live = () => repository.insertEvent({ source: 'qq', sourceKey, conversationKind: 'group',
+      conversationKey: row.chatId, actorKey: direction === 'outgoing' ? 'qq:bot' : 'qq:synthetic', actorName: row.who, direction,
+      contentText: row.text, occurredAt: NOW, visibility: 'group' });
+    const imported = () => c.manager.importExisting({ sources: { aurabot: c.sources.aurabot } });
+    if (first === 'import') { await imported(); await live(); } else { await live(); await imported(); }
+    assert.equal(c.rows('memory_events').length, 1, first);
+    const saved = c.rows('memory_events')[0];
+    assert.equal(saved.external_key, JSON.stringify(['qq', sourceKey]));
+    const config = resolveConfig(), clock = { now: () => NOW };
+    const purge = new PurgeManager({ database: c.database, config, clock,
+      backupManager: new BackupManager({ database: c.database, paths: c.paths, config, clock }) });
+    await repository.moveToRecycle({ kind: 'event', id: saved.id });
+    assert.equal((await purge.runManual({ kind: 'event', id: saved.id })).deleted, 1);
+    assert.equal(c.rows('purge_ledger')[0].source_hash, digest(`event\0${saved.external_key}`));
+    // Exercise the irreversible purge fence even without the independent import receipt.
+    await c.database.write(db => db.exec('DELETE FROM import_ledger'));
+    assert.equal((await live()).purged, true);
+    await imported();
+    assert.equal(c.rows('memory_events').length, 0, `${first} purged replay`);
+  }
+  }
+});
 async function qqFixture(sources) {
   await fs.cp(new URL('./fixtures/aurabot/', import.meta.url), sources.aurabot, { recursive: true });
 }

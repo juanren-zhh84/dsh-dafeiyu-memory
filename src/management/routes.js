@@ -77,7 +77,7 @@ export function registerManagementRoutes(ctx, service) {
         }
         if (path === '/review/run') {
           validateFields(input, []);
-          const result = await service.runDueReviews();
+          const result = await service.runDueReviews({ retryFailed: true });
           output = { queued: result.queued, completed: result.completed, retried: result.retried, failed: result.failed };
         }
         return send(res, 200, output);

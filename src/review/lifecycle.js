@@ -21,6 +21,8 @@ function timestamp(value) {
 /** Model calls are outside the serial write queue; every commit carries its lease generation. */
 export class ReviewLifecycle {
   #running;
+  #manualRunning = false;
+  #queuedManual;
   #disposed = false;
   #controller;
   #closing;
@@ -162,16 +164,36 @@ export class ReviewLifecycle {
     }
   }
 
-  runDueReviews() {
+  runDueReviews({ retryFailed = false } = {}) {
     if (this.#disposed) return Promise.reject(safeError('MEMORY_DISPOSED'));
+    if (this.#running && retryFailed === true && !this.#manualRunning) {
+      // Preserve a manual request made while the scheduled pass is still busy.
+      if (!this.#queuedManual) {
+        const queued = this.#running.then(() => {
+          if (this.#queuedManual === queued) this.#queuedManual = undefined;
+          return this.runDueReviews({ retryFailed: true });
+        }).finally(() => { if (this.#queuedManual === queued) this.#queuedManual = undefined; });
+        this.#queuedManual = queued;
+      }
+      return this.#queuedManual;
+    }
     if (!this.#running) {
-      this.#running = this.#run().finally(() => { this.#running = undefined; });
+      this.#manualRunning = retryFailed === true;
+      this.#running = this.#run(this.#manualRunning).finally(() => { this.#running = undefined; this.#manualRunning = false; });
     }
     return this.#running;
   }
 
-  async #run() {
+  async #run(retryFailed) {
     try {
+      if (retryFailed) await this.database.write((db) => {
+        if (this.#disposed) return;
+        const now = timestamp(this.clock.now());
+        // A manual action starts a fresh bounded attempt cycle on the same batch.
+        // Retain its failure code until the next outcome updates it.
+        db.prepare(`UPDATE review_jobs SET state='queued',attempts=0,lease_until=NULL,
+          next_attempt_at=?,updated_at=? WHERE state='failed'`).run(now, now);
+      });
       const summary = { ...(await this.scan()), completed: 0, retried: 0, failed: 0 };
       while (!this.#disposed) {
         const job = await this.#claim();

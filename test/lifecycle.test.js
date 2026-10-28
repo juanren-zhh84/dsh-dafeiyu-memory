@@ -13,6 +13,85 @@ import { ReviewScheduler } from '../src/review/scheduler.js';
 
 const discardAll = async ({ mode, candidates }) => ({ ...(mode === 'short-term' ? { retain: [] } : {}),
   diary: [], discard: candidates.map(({ id }) => id) });
+
+test('manual retry resets one failed job cycle, keeps audit until settlement and coalesces concurrent triggers', async t => {
+  let healthy = false;
+  const entered = deferred(), release = deferred();
+  const s = await setup(t, { config: { reviewMaxAttempts: 2, retryBaseMs: 1, retryMaxMs: 1 }, review: async input => {
+    if (!healthy) throw new Error('synthetic failure');
+    entered.resolve(); await release.promise; return discardAll(input);
+  } });
+  await s.repository.insertEvent(eventInput()); s.time.value += 7 * DAY;
+  await s.lifecycle.runDueReviews(); s.time.value++;
+  await s.lifecycle.runDueReviews();
+  const failed = s.rows('review_jobs')[0];
+  assert.equal(failed.state, 'failed'); assert.equal(failed.attempts, 2);
+  healthy = true; s.time.value++;
+  await s.lifecycle.runDueReviews(); assert.equal(s.calls.length, 2);
+  const retry = s.lifecycle.runDueReviews({ retryFailed: true });
+  const duplicate = s.lifecycle.runDueReviews({ retryFailed: true });
+  // The retry must actually reach the model; avoid hanging on a missing implementation.
+  await new Promise(setImmediate);
+  assert.equal(s.calls.length, 3);
+  await entered.promise;
+  const leased = s.rows('review_jobs')[0];
+  assert.equal(leased.id, failed.id); assert.equal(leased.attempts, 1);
+  assert.equal(leased.last_error_code, failed.last_error_code); assert.ok(leased.updated_at > failed.updated_at);
+  release.resolve(); assert.equal((await retry).completed, 1); await duplicate;
+  await s.lifecycle.runDueReviews({ retryFailed: true });
+  assert.equal(s.calls.length, 3); assert.equal(s.rows('review_jobs').length, 1);
+  assert.equal(s.rows('review_jobs')[0].state, 'completed');
+  assert.equal(s.rows('review_jobs')[0].last_error_code, null);
+  await s.lifecycle.dispose();
+  await assert.rejects(s.lifecycle.runDueReviews({ retryFailed: true }), { code: 'MEMORY_DISPOSED' });
+});
+
+test('manual retries arriving during a scheduler run wait and retry failed jobs once across workers', async t => {
+  const entered = deferred(), release = deferred(); let hold = true;
+  const s = await setup(t, { review: async input => {
+    if (hold) { hold = false; entered.resolve(); await release.promise; }
+    return discardAll(input);
+  } });
+  await s.repository.insertEvent(eventInput({ sourceKey: 'failed', conversationKey: 'failed-chat' }));
+  s.time.value += 7 * DAY; await s.lifecycle.scan();
+  const failedId = s.rows('review_jobs')[0].id;
+  await s.database.write(db => db.prepare("UPDATE review_jobs SET state='failed',attempts=8,last_error_code='MEMORY_REVIEW_MODEL_FAILED' WHERE id=?").run(failedId));
+  await s.repository.insertEvent(eventInput({ sourceKey: 'busy', occurredAt: NOW, conversationKey: 'busy-chat' }));
+  const scheduled = s.lifecycle.runDueReviews(); await entered.promise;
+  const manual = s.lifecycle.runDueReviews({ retryFailed: true });
+  const duplicate = s.lifecycle.runDueReviews({ retryFailed: true });
+  release.resolve(); await scheduled; await manual; await duplicate;
+  assert.equal(s.calls.length, 2); assert.equal(s.rows('review_jobs').find(j => j.id === failedId).state, 'completed');
+  // A second worker starting the same manual cycle cannot process the same batch again.
+  const other = new ReviewLifecycle(s.options); t.after(() => other.dispose());
+  await Promise.all([s.lifecycle.runDueReviews({ retryFailed: true }), other.runDueReviews({ retryFailed: true })]);
+  assert.equal(s.calls.length, 2);
+});
+
+test('a queued manual retry cannot wait on itself when another scheduled run wins the microtask race', async t => {
+  const s = await setup(t);
+  const scheduled = s.lifecycle.runDueReviews();
+  const next = scheduled.then(() => s.lifecycle.runDueReviews());
+  const manual = s.lifecycle.runDueReviews({ retryFailed: true });
+  await next;
+  let timer;
+  try {
+    await Promise.race([manual, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('manual retry stuck')), 100); })]);
+  } finally { clearTimeout(timer); }
+});
+
+test('separate workers manually retry the same failed batch only once', async t => {
+  const entered = deferred(), release = deferred();
+  const s = await setup(t, { review: async input => { entered.resolve(); await release.promise; return discardAll(input); } });
+  await s.repository.insertEvent(eventInput()); s.time.value += 7 * DAY; await s.lifecycle.scan();
+  await s.database.write(db => db.exec("UPDATE review_jobs SET state='failed',attempts=8,last_error_code='MEMORY_REVIEW_MODEL_FAILED'"));
+  const other = new ReviewLifecycle(s.options);
+  t.after(async () => { release.resolve(); await other.dispose(); });
+  const first = s.lifecycle.runDueReviews({ retryFailed: true }), second = other.runDueReviews({ retryFailed: true });
+  await entered.promise; await second; assert.equal(s.calls.length, 1);
+  release.resolve(); await first;
+  assert.equal(s.rows('review_jobs').length, 1); assert.equal(s.rows('review_jobs')[0].state, 'completed');
+});
 function deferred() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
 
 async function setup(t, overrides = {}) {

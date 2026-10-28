@@ -36,6 +36,20 @@ async function setup(t) {
   return { ctx, service, request, route: () => route, released: () => released };
 }
 
+test('management immediate review explicitly retries failed jobs through service assembly', async t => {
+  const s = await setup(t);
+  await s.service.recordEvent(eventInput({ occurredAt: NOW - 8 * 86400000 }));
+  s.service.reviewModel.review = async () => { throw new Error('synthetic failure'); };
+  await s.service.reviewLifecycle.scan();
+  await s.service.database.write(db => db.exec("UPDATE review_jobs SET state='failed',attempts=8,last_error_code='MEMORY_REVIEW_MODEL_FAILED',lease_until=1"));
+  let calls = 0;
+  s.service.reviewModel.review = async ({ candidates }) => { calls++; return { retain: [], diary: [], discard: candidates.map(c => c.id) }; };
+  await s.service.scheduler.lifecycle.runDueReviews();
+  assert.equal(calls, 0);
+  const result = await s.request('/review/run');
+  assert.equal(result.status, 200); assert.equal(result.body.completed, 1); assert.equal(calls, 1);
+});
+
 test('management status publishes counts, task times, capacity and connector observations without private data', async (t) => {
   const s = await setup(t);
   await s.service.recordEvent(eventInput({ actorKey: 'raw-account-secret', contentText: '正文绝不可出现在状态' }));

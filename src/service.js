@@ -20,7 +20,7 @@ export class DafeiyuMemoryService extends Service {
     this.database = database;
     this.writeQueue = database.writeQueue;
     this.repository = repository ?? new MemoryRepository({ database, writeQueue: this.writeQueue, config, clock, idGenerator });
-    this.recallEngine = new RecallEngine({ database, writeQueue: this.writeQueue, clock });
+    this.recallEngine = new RecallEngine({ database, writeQueue: this.writeQueue, clock, config });
     this.reviewModel = reviewModel ?? new ReviewModel(ctx, { config });
     this.reviewLifecycle = new ReviewLifecycle({ database, repository: this.repository, reviewModel: this.reviewModel, config, clock });
     this.backupManager = new BackupManager({ database, paths, config, clock, ...maintenance });
@@ -61,7 +61,7 @@ export class DafeiyuMemoryService extends Service {
   async search(input) { assertReady(this); return managementSearch(this.database, input); }
   async detail(input) { assertReady(this); return managementDetail(this.database, input); }
   async importExisting(options) { assertReady(this); return this.importManager.importExisting(options); }
-  async runDueReviews() { assertReady(this); return this.reviewLifecycle.runDueReviews(); }
+  async runDueReviews(options) { assertReady(this); return this.reviewLifecycle.runDueReviews(options); }
   async backup() { assertReady(this); return this.backupManager.create(); }
   async restoreRecycleItem(input) { assertReady(this); return this.repository.restoreRecycle(input); }
   async purgeRecycleItem(input, confirmation) {

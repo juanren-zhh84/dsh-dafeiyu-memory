@@ -14,8 +14,13 @@ export function record(type, value, { logical, index, originalTime, stableId, co
   if (stableId !== undefined && (typeof stableId !== 'string' && !Number.isSafeInteger(stableId))) invalid();
   if (typeof stableId === 'string') text(stableId, LIMIT.key);
   const contentHash = fingerprint(body);
-  const externalKey = fingerprint(JSON.stringify(stableId !== undefined && stableId !== '' ? [type, 'id', String(stableId)] : [type, logical, index, originalTime, contentHash]));
-  if (type === 'event') value = snapshotEventInput({ ...value, sourceKey: externalKey }, config);
+  const stableKey = stableId !== undefined && String(stableId).trim()
+    ? type === 'event' && value.source === 'qq' && value.direction === 'outgoing'
+      ? `aurabot:out:onebot:${stableId}` : String(stableId)
+    : undefined;
+  const externalKey = fingerprint(JSON.stringify(stableKey !== undefined ? [type, 'id', stableKey] : [type, logical, index, originalTime, contentHash]));
+  if (type === 'event') value = snapshotEventInput({ ...value,
+    sourceKey: stableKey ?? externalKey }, config);
   else if (type === 'item') {
     text(value.content, LIMIT.itemContent); if (!value.content.trim()) invalid();
     text(value.subjectKey, LIMIT.key); text(value.subjectName, LIMIT.name);

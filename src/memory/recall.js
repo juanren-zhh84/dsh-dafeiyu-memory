@@ -1,19 +1,21 @@
 import { memoryError } from '../contracts.js';
+import { DEFAULT_CONFIG } from '../config.js';
 import { allowsMemory, candidateScope, normalizeRequest, projectMemory } from './privacy.js';
 import { rankMemories } from './rank.js';
 
 const LAYERS = Object.freeze([
-  { name: 'short', table: 'memory_events', type: 'event', limit: 8, valid: "state IN ('active', 'review-pending')" },
-  { name: 'long', table: 'memory_items', type: 'item', limit: 6, valid: "state = 'active'" },
-  { name: 'diary', table: 'diary_entries', type: 'diary', limit: 3, valid: '1' },
+  { name: 'short', quota: 'shortTerm', table: 'memory_events', type: 'event', valid: "state IN ('active', 'review-pending')" },
+  { name: 'long', quota: 'longTerm', table: 'memory_items', type: 'item', valid: "state = 'active'" },
+  { name: 'diary', quota: 'diary', table: 'diary_entries', type: 'diary', valid: '1' },
 ]);
 const empty = () => ({ short: [], long: [], diary: [], text: '' });
 
 export class RecallEngine {
-  constructor({ database, writeQueue = database.writeQueue, clock = Date }) {
+  constructor({ database, writeQueue = database.writeQueue, clock = Date, config = DEFAULT_CONFIG }) {
     this.database = database;
     this.writeQueue = writeQueue;
     this.clock = clock;
+    this.config = config;
   }
 
   recall(input) {
@@ -30,7 +32,7 @@ export class RecallEngine {
             FROM ${layer.table} AS m WHERE ${scope.sql}`).all(...scope.params)
             .filter((row) => allowsMemory(layer.name, row, request))
             .map((row) => ({ row, projection: projectMemory(layer.name, row, request) }));
-          const ranked = rankMemories(candidates, request).slice(0, layer.limit);
+          const ranked = rankMemories(candidates, request).slice(0, this.config.recallQuotas[layer.quota]);
           result[layer.name] = ranked.map(({ projection }) => projection);
           selected.push(...ranked.map(({ row }) => ({ layer, id: row.id })));
         }

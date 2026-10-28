@@ -2,7 +2,7 @@
 
 本机 DSH 核心插件，通过 `dafeiyuMemory` 服务连接 Aurabot QQ 与 dsh-pet。短期记忆完整保留 7 天；成功整理后进入长期记忆（从晋升起 30 天）或永久日记；回收站再保留 7 天才允许物理清理。模型读取当前 DSH 选择，安装和导入脚本不切换模型。
 
-目标环境：Windows、PowerShell 7、Node.js ≥24.22.0（本机验证 24.22.1）、DSH 0.2.1-rc.2、Aurabot 1.0.2、dsh-pet 0.3.8。抖音连接器**未安装/可选**，不属于核心失败条件；下列命令只选择 QQ 和桌宠，绝不探测抖音来源。
+目标环境：Windows、PowerShell 7、Node.js ≥24.22.0（本机验证 24.22.1）、DSH 0.2.1-rc.2、Aurabot 1.0.5 / 扩展 API v1、dsh-pet 0.3.8。连接器沿用既有 1.0.2 接口设计；1.0.2 未在本轮重新实测，当前真实宿主回归以 1.0.5 为准。抖音连接器**未安装/可选**，不属于核心失败条件；下列命令只选择 QQ 和桌宠，绝不探测抖音来源。
 
 ## 文件与数据
 
@@ -98,6 +98,10 @@ apply 先运行同样的预检，再在 DSH_HOME 下创建同盘隔离 staging�
 
 导入报告在 `dafeiyu-memory/reports/import-*.json`。整理状态、重试次数和下次时间可在设置页查看；QQ 降级告警只有稳定错误码，离线副本位于模块自有 dataDir 的 `events.jsonl`。不要把该 spool 正文贴进日志。
 
+定时整理跳过 `failed` 任务。管理页“立即整理”会在同一任务上重启一个有限的尝试周期：`attempts` 从 0 重新计数，领取后为 1，清除旧租约；上一轮失败码保留到下一次结果更新，成功后清空。原 schema 不保存每一轮尝试历史。也可显式调用 `runDueReviews({ retryFailed: true })`；不传参数仍为定时语义。
+
+QQ 入站在原始 `onebot` 事件处复用宿主解析器与白名单检查，覆盖静音、命令和模块接管。出站只在实际 `send_group_msg` / `send_private_msg` 调用成功后记最终文字和媒体占位；dry-run/capture 不记发送成功。这里使用文档公开的 `api.core` 与 `api.lib()`，升级 Aurabot 时需重新运行真实宿主边界回归。稳定入站 ID 原样使用，出站为 `aurabot:out:onebot:<message_id>`，导入采用相同规则；不会重写历史数据库。
+
 - 模型超时、协议错误或数据库事务失败：不提交整理结果，不删除原记忆，稍后重试。
 - 备份失败：禁止物理清理；继续允许正常读取和记录。
 - 库无法打开：不以新空库覆盖；QQ/pet 按原聊天路径降级。
@@ -106,3 +110,5 @@ apply 先运行同样的预检，再在 DSH_HOME 下创建同盘隔离 staging�
 - 主人私聊与 pet 可查询允许的跨平台记忆；普通联系人和群严格受自己的会话投影约束。
 
 自动验证：`node --test test/acceptance.test.js`、`npm test`、`npm pack --dry-run`。测试使用合成数据与临时目录，不发送真实 QQ/抖音消息；管理界面的真实浏览器探针需要测试文件说明的本地 Playwright/React 环境。Electron 注册/真实会话仍由用户自行启动。
+
+QQ 边界回归与合成连接器使用本机安装的 Aurabot 只读源码（默认 desktop profile 下的 `dsh-aurabot-qq`，可用 `AURABOT_TEST_ROOT` 指向独立源码）。边界回归会在导入宿主前将其数据目录和工作区重定向到临时目录；支持核验版本 1.0.2、1.0.5，当前验证版本为 1.0.5。

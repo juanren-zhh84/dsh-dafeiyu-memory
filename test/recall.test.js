@@ -8,6 +8,7 @@ import { eventInput, NOW, DAY } from './fixtures/events.js';
 import { apply } from '../src/index.js';
 import { createFakeContext } from './helpers/fake-context.js';
 import { allowsMemory, candidateScope } from '../src/memory/privacy.js';
+import { resolveConfig } from '../src/config.js';
 
 const { RecallEngine } = await import('../src/memory/recall.js').catch((error) => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
@@ -151,6 +152,20 @@ test('each memory layer has its own quota and recycle is excluded', async (t) =>
   const result = c.engine.recall(request());
   assert.deepEqual([result.short.length, result.long.length, result.diary.length], [8, 6, 3]);
   assert.doesNotMatch(result.text, /回收/);
+});
+
+test('custom quotas truncate all three layers and reach the service recall engine', async t => {
+  const c = await setup(t), quotas = { shortTerm: 2, longTerm: 3, diary: 1 };
+  for (let i = 0; i < 10; i++) { await c.event(`短期${i}`); await c.item(`长期${i}`); await c.diary(`日记${i}`); }
+  const engine = new RecallEngine({ database: c.database, config: resolveConfig({ recallQuotas: quotas }) });
+  const result = engine.recall(request());
+  assert.deepEqual([result.short.length, result.long.length, result.diary.length], [2, 3, 1]);
+  const ctx = createFakeContext();
+  await apply(ctx, { recallQuotas: quotas }, { dshHome: createTempHome(), clock: { now: () => NOW },
+    timer: { setTimeout: () => 1, clearTimeout() {} } });
+  const service = ctx.get('dafeiyuMemory'); t.after(() => service.dispose());
+  for (let i = 0; i < 10; i++) await service.recordEvent(eventInput({ sourceKey: `quota-${i}` }));
+  assert.equal(service.recallEngine.recall(request()).short.length, 2);
 });
 
 test('ranking orders exact scope, text relevance, importance, recency and stable id lexicographically', async (t) => {

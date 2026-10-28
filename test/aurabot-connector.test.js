@@ -92,7 +92,7 @@ test('real core with fake Aurabot synchronously recalls both sides of one privat
     ['owner-fixture', '主人私密入站', '主人私密助手回复'],
   ]) {
     assert.equal(fake.emit('message', { ...group, kind: 'private', chatId: `private:${userId}`, userId, text: incoming, messageId: `message:${userId}` }), false);
-    fake.emit('activity', { kind: 'out', chatId: `private:${userId}`, reply: outgoing });
+    await fake.send(`private:${userId}`, outgoing);
   }
   await fake.tick();
   const base = { source: 'qq', conversationKind: 'private', conversationKey: current.chatId,
@@ -122,11 +122,10 @@ test('empty or whitespace-only input records a placeholder without inspecting me
   assert.equal(events.length, 2); assert.ok(events.every((e) => e.contentText === '[空消息]'));
 });
 
-test('outbound activities freeze unique same-millisecond keys and spool exact DTOs across recovery', async (t) => {
+test('successful outbound sends freeze unique same-millisecond keys and spool exact DTOs across recovery', async (t) => {
   const { fake, dir, events } = await fixture(t);
   fake.service = undefined;
-  const activity = { kind: 'out', chatId: group.chatId, reply: '重复回复', text: '原提问' };
-  fake.emit('activity', activity); fake.emit('activity', activity); await fake.tick();
+  await fake.send(group.chatId, '重复回复'); await fake.send(group.chatId, '重复回复'); await fake.tick();
   const pending = readFileSync(join(dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(pending.length, 2); assert.notEqual(pending[0].sourceKey, pending[1].sourceKey);
   assert.ok(pending.every((e) => e.contentText === '重复回复' && e.actorKey === 'qq:bot' && e.direction === 'outgoing'));
